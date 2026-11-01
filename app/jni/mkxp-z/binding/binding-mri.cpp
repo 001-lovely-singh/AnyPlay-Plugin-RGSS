@@ -1060,6 +1060,8 @@ lambda { |s, name|
     # Ruby 1.8: "str[i]" gave the byte NUMBER; newer Ruby gives a 1-letter string. Essentials'
     # StringInput#getc relied on that (Pokemon data such as the growth rate came back as text,
     # so "comparison of String with 6 failed" when a Pokemon was created).
+    # Same thing for "file.read(1)[0]" (first byte as a number in Ruby 1.8)
+    s = s.gsub(/\.read\(\s*(\d+)\s*\)\[0\]/) { ".read(#{$1}).getbyte(0)" } if s.include?(".read(")
     if s.include?("class StringInput")
       s = s.gsub(/^([ \t]*\w+[ \t]*=[ \t]*)@string\[@pos\][ \t]*$/) { "#{$1}@string.getbyte(@pos)" }
     end
@@ -1176,7 +1178,7 @@ begin
   f = "AnyPlay_script_errors.txt"
   errs = $__anyplay_syntax_errors
   if errs && !errs.empty?
-    File.open(f, "w") { |io| io.puts("AnyPlay compat v5. Scripts that could not be parsed (" + errs.size.to_s + "):\n\n" + errs.join("\n\n")) }
+    File.open(f, "w") { |io| io.puts("AnyPlay compat v6. Scripts that could not be parsed (" + errs.size.to_s + "):\n\n" + errs.join("\n\n")) }
   elsif File.exist?(f)
     File.delete(f)
   end
