@@ -1062,9 +1062,11 @@ lambda { |s, name|
     # so "comparison of String with 6 failed" when a Pokemon was created).
     # Same thing for "file.read(1)[0]" (first byte as a number in Ruby 1.8)
     s = s.gsub(/\.read\(\s*(\d+)\s*\)\[0\]/) { ".read(#{$1}).getbyte(0)" } if s.include?(".read(")
-    # Comparing "str[i]" with a hex byte value (BOM / file-signature checks): in Ruby 1.8 that was a
-    # number, now it is text and never equal. __anyplay_byte gives the number for strings.
-    s = s.gsub(/(?<![.\w@$\])])([A-Za-z_@$][\w@$]*)\[(\w+)\][ \t]*(==|!=|<=|>=|<|>)[ \t]*(0x[0-9A-Fa-f]+)\b/) { "__anyplay_byte(#{$1},#{$2})#{$3}#{$4}" } if s =~ /\]\s*(?:==|!=|<=|>=|<|>)\s*0x/
+    # BOM check ("line[0]==0xEF") and the MP3 header scan ("rstr[0]==0xFB"): in Ruby 1.8 str[i] was a number,
+    # now it is text and never equal. __anyplay_byte gives the number for strings.
+    s = s.gsub(/(?<![.\w@$\])])(line|rstr)\[(\w+)\][ \t]*(==|!=|<=|>=|<|>)[ \t]*(0x[0-9A-Fa-f]+)\b/) { "__anyplay_byte(#{$1},#{$2})#{$3}#{$4}" } if s =~ /\]\s*(?:==|!=|<=|>=|<|>)\s*0x/
+    # MP3 play-time scan (Essentials AudioUtilities): the 3 bytes after the 0xFF marker are used as numbers
+    s = s.gsub(/\brstr\s*=\s*file\.read\(3\)/, 'rstr = file.read(3).unpack("C*")') if s.include?("def getPlayTime2")
     if s.include?("class StringInput")
       s = s.gsub(/^([ \t]*\w+[ \t]*=[ \t]*)@string\[@pos\][ \t]*$/) { "#{$1}@string.getbyte(@pos)" }
     end
@@ -1181,7 +1183,7 @@ begin
   f = "AnyPlay_script_errors.txt"
   errs = $__anyplay_syntax_errors
   if errs && !errs.empty?
-    File.open(f, "w") { |io| io.puts("AnyPlay compat v7. Scripts that could not be parsed (" + errs.size.to_s + "):\n\n" + errs.join("\n\n")) }
+    File.open(f, "w") { |io| io.puts("AnyPlay compat v8. Scripts that could not be parsed (" + errs.size.to_s + "):\n\n" + errs.join("\n\n")) }
   elsif File.exist?(f)
     File.delete(f)
   end
