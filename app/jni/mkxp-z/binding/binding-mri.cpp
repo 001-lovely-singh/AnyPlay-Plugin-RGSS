@@ -1062,6 +1062,9 @@ lambda { |s, name|
     # so "comparison of String with 6 failed" when a Pokemon was created).
     # Same thing for "file.read(1)[0]" (first byte as a number in Ruby 1.8)
     s = s.gsub(/\.read\(\s*(\d+)\s*\)\[0\]/) { ".read(#{$1}).getbyte(0)" } if s.include?(".read(")
+    # Comparing "str[i]" with a hex byte value (BOM / file-signature checks): in Ruby 1.8 that was a
+    # number, now it is text and never equal. __anyplay_byte gives the number for strings.
+    s = s.gsub(/(?<![.\w@$\])])([A-Za-z_@$][\w@$]*)\[(\w+)\][ \t]*(==|!=|<=|>=|<|>)[ \t]*(0x[0-9A-Fa-f]+)\b/) { "__anyplay_byte(#{$1},#{$2})#{$3}#{$4}" } if s =~ /\]\s*(?:==|!=|<=|>=|<|>)\s*0x/
     if s.include?("class StringInput")
       s = s.gsub(/^([ \t]*\w+[ \t]*=[ \t]*)@string\[@pos\][ \t]*$/) { "#{$1}@string.getbyte(@pos)" }
     end
@@ -1178,7 +1181,7 @@ begin
   f = "AnyPlay_script_errors.txt"
   errs = $__anyplay_syntax_errors
   if errs && !errs.empty?
-    File.open(f, "w") { |io| io.puts("AnyPlay compat v6. Scripts that could not be parsed (" + errs.size.to_s + "):\n\n" + errs.join("\n\n")) }
+    File.open(f, "w") { |io| io.puts("AnyPlay compat v7. Scripts that could not be parsed (" + errs.size.to_s + "):\n\n" + errs.join("\n\n")) }
   elsif File.exist?(f)
     File.delete(f)
   end
@@ -1538,6 +1541,41 @@ begin
       false
     end
     private :require
+  end
+rescue Exception
+end
+
+
+# Helper for the compat layer: byte value of str[i] (Ruby 1.8 gave a number, new Ruby gives text).
+module Kernel
+  def __anyplay_byte(x, i)
+    x.is_a?(String) ? x.getbyte(i) : x[i]
+  end
+  private :__anyplay_byte
+end
+
+# Ruby 1.8 accepted a lone "%" in sprintf formats such as sprintf("%d%", 50); newer Ruby raises
+# "incomplete format specifier". Retry once with the stray "%" written as "%%".
+begin
+  module Kernel
+    alias_method :__anyplay_sprintf, :sprintf
+    def sprintf(fmt, *args)
+      __anyplay_sprintf(fmt, *args)
+    rescue ArgumentError => e
+      raise unless fmt.is_a?(String) && e.message.include?("incomplete format specifier")
+      __anyplay_sprintf(fmt.gsub(/%(?![-+ 0#*\d.<{\[a-zA-Z%])/, "%%"), *args)
+    end
+    alias_method :format, :sprintf
+    module_function :sprintf, :format
+  end
+  class String
+    alias_method :__anyplay_percent, :%
+    def %(arg)
+      __anyplay_percent(arg)
+    rescue ArgumentError => e
+      raise unless e.message.include?("incomplete format specifier")
+      self.gsub(/%(?![-+ 0#*\d.<{\[a-zA-Z%])/, "%%").__anyplay_percent(arg)
+    end
   end
 rescue Exception
 end
