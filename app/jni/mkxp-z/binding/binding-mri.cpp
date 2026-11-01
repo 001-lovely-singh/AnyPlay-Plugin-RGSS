@@ -1057,6 +1057,12 @@ lambda { |s, name|
     s = s.gsub(/^([ \t]*when\b[^\n#]*?[\w)\]"'])[ \t]*:(?!:)(?=[ \t]*(?:#|\r?$))/) { "#{$1} then" }
     s = s.gsub(/^([ \t]*when\b[^\n#]*?[\w)\]"']):[ \t]+(?=[^\s#])/) { "#{$1} then " }
     s = s.gsub('\x7f-\x9f') { '\u007f-\u009f' }
+    # Ruby 1.8: "str[i]" gave the byte NUMBER; newer Ruby gives a 1-letter string. Essentials'
+    # StringInput#getc relied on that (Pokemon data such as the growth rate came back as text,
+    # so "comparison of String with 6 failed" when a Pokemon was created).
+    if s.include?("class StringInput")
+      s = s.gsub(/^([ \t]*\w+[ \t]*=[ \t]*)@string\[@pos\][ \t]*$/) { "#{$1}@string.getbyte(@pos)" }
+    end
 
     # Self-healing: ask Ruby's parser whether the script is valid. If not, fix the
     # reported lines (only those) for known Ruby 1.8-only syntax and try again.
@@ -1170,7 +1176,7 @@ begin
   f = "AnyPlay_script_errors.txt"
   errs = $__anyplay_syntax_errors
   if errs && !errs.empty?
-    File.open(f, "w") { |io| io.puts("AnyPlay compat v4. Scripts that could not be parsed (" + errs.size.to_s + "):\n\n" + errs.join("\n\n")) }
+    File.open(f, "w") { |io| io.puts("AnyPlay compat v5. Scripts that could not be parsed (" + errs.size.to_s + "):\n\n" + errs.join("\n\n")) }
   elsif File.exist?(f)
     File.delete(f)
   end
