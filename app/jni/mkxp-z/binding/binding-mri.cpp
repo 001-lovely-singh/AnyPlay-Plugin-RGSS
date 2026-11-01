@@ -2161,6 +2161,10 @@ module AnyPlayCheats
         if @old_textspeed && defined?($PokemonSystem) && $PokemonSystem
           $PokemonSystem.textspeed = @old_textspeed
         end
+        if @fast_text_set && defined?(MessageConfig) && MessageConfig.respond_to?(:pbSetTextSpeed)
+          (MessageConfig.pbSetTextSpeed(MessageConfig.pbSettingToTextSpeed(@old_textspeed)) rescue nil)
+        end
+        @fast_text_set = false
         @old_textspeed = nil
       when 'items'
         @item_snap = nil
@@ -2565,7 +2569,11 @@ module AnyPlayCheats
       keep_items if on?('items')
       if on?('fastText') && defined?($PokemonSystem) && $PokemonSystem
         @old_textspeed = $PokemonSystem.textspeed if @old_textspeed.nil?
-        $PokemonSystem.textspeed = 2 if $PokemonSystem.textspeed != 2
+        $PokemonSystem.textspeed = 2 if $PokemonSystem.textspeed != 2        # The game keeps its own copy of the speed (MessageConfig), so set that too.
+        if !@fast_text_set && defined?(MessageConfig) && MessageConfig.respond_to?(:pbSetTextSpeed)
+          MessageConfig.pbSetTextSpeed(MessageConfig.pbSettingToTextSpeed(2))
+          @fast_text_set = true
+        end
       end
       common_map_cheats
     end
@@ -2754,13 +2762,53 @@ module AnyPlayCheats
 end
 
 AnyPlayTouch.native_resize = (Graphics.method(:resize_screen) rescue nil)
+# Frame-time watcher: writes AnyPlay_perf_log.txt with one line for every frame
+# that took very long, saying whether the time went into the game's own scripts,
+# into the engine (drawing / reading files), into Ruby's garbage collector, or
+# into the AnyPlay layers.
+module AnyPlayPerf
+  @n = 0
+  @last_end = nil
+  @gc_count = 0
+  @gc_ms = 0
+  @t0 = nil
+  def self.now
+    Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
+  def self.note(script_ms, engine_ms, layer_ms, where)
+    return if @n > 150
+    @n += 1
+    gc = GC.stat
+    gcn = gc[:count] - @gc_count
+    gct = (gc[:time] || 0) - @gc_ms
+    @gc_count = gc[:count]
+    @gc_ms = gc[:time] || 0
+    line = "t=#{((now - @t0)).round(1)}s script=#{script_ms}ms engine=#{engine_ms}ms layers=#{layer_ms}ms gc_runs=#{gcn} gc_ms=#{gct} at=#{where}"
+    File.__anyplay_open("AnyPlay_perf_log.txt", "a") { |f| f.puts(line) }
+  rescue Exception
+  end
+  def self.run(orig)
+    t1 = now
+    @t0 ||= t1
+    script_ms = @last_end ? ((t1 - @last_end) * 1000).to_i : 0
+    where = nil
+    where = (caller(2, 3) || []).map { |c| c[/[^\/]*\z/] }.join(" < ") if script_ms > 120
+    r = orig.call
+    t2 = now
+    AnyPlayTouch.frame
+    AnyPlayCheats.frame
+    t3 = now
+    engine_ms = ((t2 - t1) * 1000).to_i
+    layer_ms = ((t3 - t2) * 1000).to_i
+    note(script_ms, engine_ms, layer_ms, where || "-") if script_ms > 120 || engine_ms > 120 || layer_ms > 30
+    @last_end = t3
+    r
+  end
+end
 class << Graphics
   alias_method :__anyplay_update, :update
   def update(*a)
-    r = __anyplay_update(*a)
-    AnyPlayTouch.frame
-    AnyPlayCheats.frame
-    r
+    AnyPlayPerf.run(lambda { __anyplay_update(*a) })
   end
 end
 )RB", &preState);
