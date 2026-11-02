@@ -1619,33 +1619,67 @@ if defined?(Audio)
 end
 
 # Speed: many games ask "does this picture / sound exist?" hundreds of times
-# while a map loads (every name is tried with several endings). On a phone every
-# such question goes to slow storage. Remember the answers for the read-only
-# resource folders. A "yes" is kept; a "no" is forgotten after 20 seconds.
+# while a map loads (every name is tried with several endings), and most answers
+# are "no". On a phone every such question is a slow trip to the storage. Instead
+# the folder is listed once (one trip) and the answers come from that list.
+# The list is refreshed every 15 seconds, so files that appear later are found.
+# Only the read-only resource folders are handled this way.
 module AnyPlayFastFiles
   RES = /\A(?:\.\/)?(?:Graphics|Audio|Fonts)\//i
-  @cache = {}
+  TTL = 15
+  @dirs = {}     # "Graphics/Battlers" => [time, {name => true}]
+  @yes = {}      # "Graphics/Battlers/1.png" => answer of the real call
   class << self
-    attr_reader :cache
+    attr_reader :dirs, :yes
   end
   def self.now
     Process.clock_gettime(Process::CLOCK_MONOTONIC)
   end
+  def self.listing(dir)
+    e = @dirs[dir]
+    return e[1] if e && (now - e[0]) < TTL
+    names = {}
+    begin
+      Dir.children(dir).each { |n| names[n] = true }
+    rescue Exception
+      names = {}
+    end
+    @dirs.clear if @dirs.size > 400
+    @dirs[dir] = [now, names]
+    names
+  end
+  # true / false when the list can answer, nil when the real call must be used
+  def self.known(path)
+    return nil unless path.is_a?(String) && path.bytesize < 400 && path =~ RES
+    return nil if path.include?("..") || path.end_with?("/")
+    base = File.basename(path)
+    return nil unless base.ascii_only?
+    dir = File.dirname(path)
+    return nil if dir.empty?
+    names = listing(dir)
+    names.key?(base) ? :maybe : false
+  rescue Exception
+    nil
+  end
   [[File, :exist?], [File, :file?], [FileTest, :exist?], [FileTest, :file?]].each do |mod, meth|
     orig = mod.method(meth)
+    tag = "#{mod.name}.#{meth}:"
     mod.define_singleton_method(meth) do |path|
-      if path.is_a?(String) && path.bytesize < 400 && path =~ RES
-        key = "#{mod.name}.#{meth}:#{path}"
-        hit = AnyPlayFastFiles.cache[key]
-        if hit
-          return hit[0] if hit[0] || (AnyPlayFastFiles.now - hit[1]) < 20
-        end
-        val = orig.call(path)
-        AnyPlayFastFiles.cache.clear if AnyPlayFastFiles.cache.size > 30_000
-        AnyPlayFastFiles.cache[key] = [val, AnyPlayFastFiles.now]
-        val
-      else
+      k = AnyPlayFastFiles.known(path)
+      if k.nil?
         orig.call(path)
+      elsif k == false
+        false
+      else
+        key = tag + path
+        yes = AnyPlayFastFiles.yes
+        v = yes[key]
+        if v.nil?
+          v = orig.call(path)
+          yes.clear if yes.size > 30_000
+          yes[key] = v
+        end
+        v
       end
     end
   end
@@ -1657,7 +1691,7 @@ end
 # catches itself - those are marked), (3) the final error that stopped the game
 # with the full call chain, and (4) a few notes (touch / slow frames) for context.
 module AnyPlayLog
-  VERSION   = "0.1.29"
+  VERSION   = "0.1.30"
   FILE      = "AnyPlayLog.txt"
   MAX_BYTES = 250_000
   CAPS      = { error: 200, note: 120 }
