@@ -14,22 +14,26 @@ android {
         applicationId "com.anyplay.rgssplugin"
         minSdk 23
         targetSdk 33
-        versionCode 35
-        versionName "0.1.8"
+        versionCode 55
+        versionName "0.1.28"
         archivesBaseName = "mkxp-z-$versionName"
         ndk.debugSymbolLevel = 'FULL'
     }
 
-    // AnyPlay: ONE fixed signing key, stored in the repo (app/anyplay-rgss.keystore).
-    // GitHub Actions makes a brand-new random debug key on every run, so every build
-    // had a different signature and Android refused to update the old install
-    // ("uninstall first"). With this fixed key, every new APK installs OVER the old one.
+    // AnyPlay: the signing key is NOT stored in the repo. GitHub Actions puts it in
+    // the ANYPLAY_* environment variables from the repository secrets. Every build
+    // uses the same key, so a new APK installs over the old one.
+    // Without those variables (for example a local test build) Gradle uses its
+    // own debug key.
     signingConfigs {
         anyplay {
-            storeFile file('anyplay-rgss.keystore')
-            storePassword 'anyplay123'
-            keyAlias 'anyplay'
-            keyPassword 'anyplay123'
+            def ks = System.getenv('ANYPLAY_KEYSTORE_FILE')
+            if (ks) {
+                storeFile file(ks)
+                storePassword System.getenv('ANYPLAY_STORE_PASSWORD')
+                keyAlias System.getenv('ANYPLAY_KEY_ALIAS')
+                keyPassword System.getenv('ANYPLAY_KEY_PASSWORD')
+            }
         }
     }
 
@@ -39,7 +43,7 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
             // AnyPlay: an UNSIGNED APK cannot be installed on Android ("package appears
             // to be invalid"), so sign with the fixed AnyPlay key defined above.
-            signingConfig signingConfigs.anyplay
+            signingConfig System.getenv('ANYPLAY_KEYSTORE_FILE') ? signingConfigs.anyplay : signingConfigs.debug
         }
 
         debug {
