@@ -1026,8 +1026,19 @@ $__anyplay_fix_proc_return = lambda { |s|
     out << s[pos...open]
     # only procs registered at top level (statement starts in column 0): inside
     # a method `return` in a proc legitimately returns from that method.
-    line_start = (s.rindex("\n", m.begin(0) - 1) || -1) + 1
-    top_level = !(s[line_start] == " " || s[line_start] == "\t")
+    unless defined?(in_def)
+      in_def = []
+      stack = []
+      s.split("\n", -1).each do |ln|
+        in_def << !stack.empty?
+        if (md = ln.match(/\A(\s*)def\b/)) && !ln.match?(/\bend\s*\z/)
+          stack << md[1].length
+        elsif (md = ln.match(/\A(\s*)end\b/)) && stack.last == md[1].length
+          stack.pop
+        end
+      end
+    end
+    top_level = !in_def[s[0...m.begin(0)].count("\n")]
     if top_level && body =~ /\breturn\b/ && body !~ /\bdef\s/
       last_line = body[/[^\n]*\z/]
       if last_line.include?("#")
@@ -1053,6 +1064,13 @@ lambda { |s, name|
   begin
     s = $__anyplay_fix_proc_return.call(s) if $__anyplay_fix_proc_return
     s = s.gsub(/\.new[ \t]+\(/, '.new(')
+    # Games written for newer mkxp-z call Audio.bgm_play(file, volume, pitch, position);
+    # their own wrapper script only takes three arguments. Accept (and ignore) a fourth.
+    if s.include?("def self.bgm_play") || s.include?("def self.bgs_play")
+      s = s.gsub(/def self\.(bgm|bgs|me|se)_play\(\s*(\w+)\s*,\s*(\w+)\s*=\s*100\s*,\s*(\w+)\s*=\s*100\s*\)/) do
+        "def self.#{$1}_play(#{$2}, #{$3} = 100, #{$4} = 100, __ap_pos = 0)"
+      end
+    end
     # Ruby 1.8 allowed "when 0:" (colon instead of "then"); Ruby 1.9+ does not.
     s = s.gsub(/^([ \t]*when\b[^\n#]*?[\w)\]"'])[ \t]*:(?!:)(?=[ \t]*(?:#|\r?$))/) { "#{$1} then" }
     s = s.gsub(/^([ \t]*when\b[^\n#]*?[\w)\]"']):[ \t]+(?=[^\s#])/) { "#{$1} then " }
@@ -1183,7 +1201,7 @@ begin
   old = "AnyPlay_script_errors.txt"
   File.delete(old) if File.exist?(old)
   errs = $__anyplay_syntax_errors
-  AnyPlayLog.script_errors(errs, "v8") if errs && !errs.empty? && defined?(AnyPlayLog)
+  AnyPlayLog.script_errors(errs, "v9") if errs && !errs.empty? && defined?(AnyPlayLog)
 rescue Exception
 end
 )RB");
@@ -1594,13 +1612,19 @@ class << File
   end
 end
 
+# Games written for newer mkxp-z ask for the music position when pausing.
+if defined?(Audio)
+  Audio.define_singleton_method(:bgm_position) { 0.0 } unless Audio.respond_to?(:bgm_position)
+  Audio.define_singleton_method(:bgs_position) { 0.0 } unless Audio.respond_to?(:bgs_position)
+end
+
 # ---- AnyPlayLog: one file, "AnyPlayLog.txt" in the game folder -----------------
 # Created only when something goes wrong.  It lists (1) scripts that could not be
 # parsed, (2) every kind of Ruby error the game hits (also the ones the game
 # catches itself - those are marked), (3) the final error that stopped the game
 # with the full call chain, and (4) a few notes (touch / slow frames) for context.
 module AnyPlayLog
-  VERSION   = "0.1.25"
+  VERSION   = "0.1.27"
   FILE      = "AnyPlayLog.txt"
   MAX_BYTES = 250_000
   CAPS      = { error: 200, note: 120 }
@@ -1713,8 +1737,8 @@ module AnyPlayLog
       end
     end
 
-    def slow(msg)
-      @slow += 1
+    def slow(msg, weight = 1)
+      @slow += weight
       write("slow: " + msg)
       start if @slow == 15   # slowness that keeps happening is worth a file
     end
@@ -1749,8 +1773,8 @@ module AnyPlayLog
       return if cname =~ IGNORE
       bt = (e.backtrace || [])
       first = bt.first.to_s
-      msg = clean(e.message, 300)
-      key = "#{cname}|#{msg[0, 80]}|#{first}"
+      msg = clean(e.message.to_s.sub(/ for #<([\w:]+)[: ].*\z/m, ' for #<\1>'), 300)
+      key = "#{cname}|#{msg[0, 80].gsub(/\d+/, 'N')}|#{first}"
       c = (@seen[key] = (@seen[key] || 0) + 1)
       line = "#{cname}: #{msg} @ #{label(first)}"
       @ring << "[#{stamp}] #{line}" if c == 1
@@ -3002,6 +3026,9 @@ module AnyPlayPerf
   @gc_count = 0
   @gc_ms = 0
   @t0 = nil
+  @w_frames = 0; @w_time = 0.0; @w_script = 0.0; @w_engine = 0.0
+  @w_o50 = 0; @w_o100 = 0; @w_max = 0.0; @w_start = nil; @prev_t1 = nil
+  @w_gc = 0; @w_gcms = 0
   def self.now
     Process.clock_gettime(Process::CLOCK_MONOTONIC)
   end
@@ -3015,6 +3042,35 @@ module AnyPlayPerf
     @gc_ms = gc[:time] || 0
     line = "t=#{((now - @t0)).round(1)}s script=#{script_ms}ms engine=#{engine_ms}ms layers=#{layer_ms}ms gc_runs=#{gcn} gc_ms=#{gct} at=#{where}"
     AnyPlayLog.slow(line)
+  rescue Exception
+  end
+  # Every ~600 frames: one summary line when the game ran below its target speed.
+  # Shows how many frames were slow and whether the time went into the game's
+  # scripts, into the engine (drawing / waiting), or into garbage collection.
+  def self.window(t1, script_ms, engine_ms)
+    if @prev_t1
+      dt = (t1 - @prev_t1) * 1000.0
+      @w_frames += 1
+      @w_time += dt
+      @w_script += script_ms
+      @w_engine += engine_ms
+      @w_o50 += 1 if dt > 50
+      @w_o100 += 1 if dt > 100
+      @w_max = dt if dt > @w_max
+    end
+    @prev_t1 = t1
+    return if @w_frames < 600
+    fps = @w_frames * 1000.0 / @w_time
+    target = (Graphics.frame_rate rescue 40).to_f
+    gc = GC.stat
+    gcn = gc[:count] - @w_gc
+    gct = (gc[:time] || 0) - @w_gcms
+    @w_gc = gc[:count]; @w_gcms = gc[:time] || 0
+    if fps < target * 0.9 || @w_o50 > 8
+      AnyPlayLog.slow("window: fps=#{fps.round(1)}/#{target.to_i} frames>50ms=#{@w_o50} frames>100ms=#{@w_o100} worst=#{@w_max.to_i}ms script_avg=#{(@w_script / @w_frames).round(1)}ms engine_avg=#{(@w_engine / @w_frames).round(1)}ms gc_runs=#{gcn} gc_ms=#{gct} #{AnyPlayLog.context}", 5)
+    end
+    @w_frames = 0; @w_time = 0.0; @w_script = 0.0; @w_engine = 0.0
+    @w_o50 = 0; @w_o100 = 0; @w_max = 0.0
   rescue Exception
   end
   def self.run(orig)
@@ -3037,6 +3093,7 @@ module AnyPlayPerf
     engine_ms = ((t2 - t1) * 1000).to_i
     layer_ms = ((t3 - t2) * 1000).to_i
     note(script_ms, engine_ms, layer_ms, where || "-") if script_ms > 120 || engine_ms > 120 || layer_ms > 30
+    window(t1, script_ms, engine_ms)
     @last_end = t3
     r
   end
