@@ -27,7 +27,7 @@ New versions install over the old one. Nothing needs to be uninstalled.
 
 When something goes wrong, the plugin writes a file called **`AnyPlayLog.txt`** into the game's folder. The file is created fresh every time the game is started, and only if there is something to report. It lists script errors, the error that stopped the game (with the script name and line), and, if the game runs slowly, which part is slow.
 
-Please open an issue and attach that file, together with the game name and your phone model.
+Please report it on **[Discord](https://discord.gg/Y9Yjsn5yDP)** and attach that file, together with the game name and your phone model.
 
 ## 👨‍🍳 Build it yourself
 
