@@ -1624,7 +1624,7 @@ end
 # catches itself - those are marked), (3) the final error that stopped the game
 # with the full call chain, and (4) a few notes (touch / slow frames) for context.
 module AnyPlayLog
-  VERSION   = "0.1.27"
+  VERSION   = "0.1.28"
   FILE      = "AnyPlayLog.txt"
   MAX_BYTES = 250_000
   CAPS      = { error: 200, note: 120 }
@@ -1639,6 +1639,8 @@ module AnyPlayLog
   @internal = 0
   @watching = false
   @t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  # every launch starts with a clean file, so it only describes the last run
+  (File.delete(FILE) if File.exist?(FILE)) rescue nil
   IGNORE = /\A(SystemExit|Interrupt|StopIteration|SignalException|Reset|RGSSReset)\z/
 
   class << self
@@ -1704,8 +1706,6 @@ module AnyPlayLog
     def start
       return if @started
       @started = true
-      (File.delete(FILE) if File.exist?(FILE) && File.size(FILE) > 200_000) rescue nil
-      raw("") if (File.exist?(FILE) && File.size(FILE) > 0) rescue nil
       header
       unless @notes.empty?
         raw("-- notes from before the first error --")
@@ -3029,8 +3029,33 @@ module AnyPlayPerf
   @w_frames = 0; @w_time = 0.0; @w_script = 0.0; @w_engine = 0.0
   @w_o50 = 0; @w_o100 = 0; @w_max = 0.0; @w_start = nil; @prev_t1 = nil
   @w_gc = 0; @w_gcms = 0
+  @samples = Hash.new(0)
   def self.now
     Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
+  # A tiny sampling profiler: ~25 times a second it looks at which game script
+  # line is running. The summary line then names the busiest places.
+  def self.start_sampler
+    return if @sampler
+    main = Thread.current
+    @sampler = Thread.new do
+      loop do
+        sleep 0.04
+        begin
+          bt = main.backtrace(0, 14)
+          l = bt && bt.find { |x| x =~ /\ASection\d|\A\d{3}:/ }
+          @samples[AnyPlayLog.label(l)] += 1 if l && @samples.size < 400
+        rescue Exception
+        end
+      end
+    end
+  rescue Exception
+  end
+  def self.top_samples
+    list = @samples.sort_by { |_, v| -v }
+    total = list.inject(0) { |a, (_, v)| a + v }
+    @samples = Hash.new(0)
+    "busiest(#{total} samples): " + list.first(6).map { |k, v| "#{v}x #{k}" }.join(" | ")
   end
   def self.note(script_ms, engine_ms, layer_ms, where)
     return if @n > 150
@@ -3068,6 +3093,9 @@ module AnyPlayPerf
     @w_gc = gc[:count]; @w_gcms = gc[:time] || 0
     if fps < target * 0.9 || @w_o50 > 8
       AnyPlayLog.slow("window: fps=#{fps.round(1)}/#{target.to_i} frames>50ms=#{@w_o50} frames>100ms=#{@w_o100} worst=#{@w_max.to_i}ms script_avg=#{(@w_script / @w_frames).round(1)}ms engine_avg=#{(@w_engine / @w_frames).round(1)}ms gc_runs=#{gcn} gc_ms=#{gct} #{AnyPlayLog.context}", 5)
+      AnyPlayLog.slow(top_samples, 0)
+    else
+      @samples = Hash.new(0)
     end
     @w_frames = 0; @w_time = 0.0; @w_script = 0.0; @w_engine = 0.0
     @w_o50 = 0; @w_o100 = 0; @w_max = 0.0
@@ -3080,6 +3108,7 @@ module AnyPlayPerf
     where = nil
     where = (caller(2, 3) || []).map { |c| AnyPlayLog.label(c) }.join(" < ") if script_ms > 120
     AnyPlayLog.watch
+    start_sampler
     r = orig.call
     t2 = now
     AnyPlayLog.internal += 1
