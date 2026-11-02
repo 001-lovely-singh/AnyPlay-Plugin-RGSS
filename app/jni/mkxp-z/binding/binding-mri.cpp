@@ -1618,13 +1618,46 @@ if defined?(Audio)
   Audio.define_singleton_method(:bgs_position) { 0.0 } unless Audio.respond_to?(:bgs_position)
 end
 
+# Speed: many games ask "does this picture / sound exist?" hundreds of times
+# while a map loads (every name is tried with several endings). On a phone every
+# such question goes to slow storage. Remember the answers for the read-only
+# resource folders. A "yes" is kept; a "no" is forgotten after 20 seconds.
+module AnyPlayFastFiles
+  RES = /\A(?:\.\/)?(?:Graphics|Audio|Fonts)\//i
+  @cache = {}
+  class << self
+    attr_reader :cache
+  end
+  def self.now
+    Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  end
+  [[File, :exist?], [File, :file?], [FileTest, :exist?], [FileTest, :file?]].each do |mod, meth|
+    orig = mod.method(meth)
+    mod.define_singleton_method(meth) do |path|
+      if path.is_a?(String) && path.bytesize < 400 && path =~ RES
+        key = "#{mod.name}.#{meth}:#{path}"
+        hit = AnyPlayFastFiles.cache[key]
+        if hit
+          return hit[0] if hit[0] || (AnyPlayFastFiles.now - hit[1]) < 20
+        end
+        val = orig.call(path)
+        AnyPlayFastFiles.cache.clear if AnyPlayFastFiles.cache.size > 30_000
+        AnyPlayFastFiles.cache[key] = [val, AnyPlayFastFiles.now]
+        val
+      else
+        orig.call(path)
+      end
+    end
+  end
+end
+
 # ---- AnyPlayLog: one file, "AnyPlayLog.txt" in the game folder -----------------
 # Created only when something goes wrong.  It lists (1) scripts that could not be
 # parsed, (2) every kind of Ruby error the game hits (also the ones the game
 # catches itself - those are marked), (3) the final error that stopped the game
 # with the full call chain, and (4) a few notes (touch / slow frames) for context.
 module AnyPlayLog
-  VERSION   = "0.1.28"
+  VERSION   = "0.1.29"
   FILE      = "AnyPlayLog.txt"
   MAX_BYTES = 250_000
   CAPS      = { error: 200, note: 120 }
