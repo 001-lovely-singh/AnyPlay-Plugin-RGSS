@@ -1180,13 +1180,10 @@ lambda { |s, name|
         }
         rb_eval_string(R"RB(
 begin
-  f = "AnyPlay_script_errors.txt"
+  old = "AnyPlay_script_errors.txt"
+  File.delete(old) if File.exist?(old)
   errs = $__anyplay_syntax_errors
-  if errs && !errs.empty?
-    File.open(f, "w") { |io| io.puts("AnyPlay compat v8. Scripts that could not be parsed (" + errs.size.to_s + "):\n\n" + errs.join("\n\n")) }
-  elsif File.exist?(f)
-    File.delete(f)
-  end
+  AnyPlayLog.script_errors(errs, "v8") if errs && !errs.empty? && defined?(AnyPlayLog)
 rescue Exception
 end
 )RB");
@@ -1597,13 +1594,203 @@ class << File
   end
 end
 
+# ---- AnyPlayLog: one file, "AnyPlayLog.txt" in the game folder -----------------
+# Created only when something goes wrong.  It lists (1) scripts that could not be
+# parsed, (2) every kind of Ruby error the game hits (also the ones the game
+# catches itself - those are marked), (3) the final error that stopped the game
+# with the full call chain, and (4) a few notes (touch / slow frames) for context.
 module AnyPlayLog
-  @n = 0
-  def self.write(msg)
-    return if @n > 400
-    @n += 1
-    File.__anyplay_open("AnyPlay_touch_log.txt", "a") { |f| f.puts(msg) }
-  rescue Exception
+  VERSION   = "0.1.25"
+  FILE      = "AnyPlayLog.txt"
+  MAX_BYTES = 250_000
+  CAPS      = { error: 200, note: 120 }
+  @bytes = 0
+  @started = false
+  @full = false
+  @cnt = Hash.new(0)
+  @seen = {}
+  @ring = []        # recent exceptions of any kind (written when the game stops)
+  @notes = []       # notes kept in memory until a real error shows up
+  @slow = 0
+  @internal = 0
+  @watching = false
+  @t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
+  IGNORE = /\A(SystemExit|Interrupt|StopIteration|SignalException|Reset|RGSSReset)\z/
+
+  class << self
+    attr_accessor :internal
+
+    def stamp
+      "%s +%ds" % [Time.now.strftime("%H:%M:%S"), (Process.clock_gettime(Process::CLOCK_MONOTONIC) - @t0).to_i]
+    end
+
+    # run code without our own error watcher noticing exceptions it rescues
+    def quiet
+      @internal += 1
+      yield
+    ensure
+      @internal -= 1
+    end
+
+    def clean(x, n = 400)
+      x.to_s.dup.force_encoding("UTF-8").scrub("?")[0, n]
+    rescue Exception
+      "?"
+    end
+
+    def script_name(i)
+      ($RGSS_SCRIPTS[i][1]).to_s
+    rescue Exception
+      "?"
+    end
+
+    # "Section051:1158:in 'x'" -> "Section051 <AudioUtilities>:1158:in 'x'"
+    def label(l)
+      l = clean(l, 300)
+      if l =~ /\ASection(\d+)(:.*)\z/m
+        "Section#{$1} <#{script_name($1.to_i)}>#{$2}"
+      else
+        l
+      end
+    end
+
+    def raw(line)
+      return if @full
+      File.__anyplay_open(FILE, "a") { |f| f.puts(line) }
+      @bytes += line.to_s.bytesize + 1
+      if @bytes > MAX_BYTES
+        @full = true
+        File.__anyplay_open(FILE, "a") { |f| f.puts("-- log is full, later problems are not written --") }
+      end
+    rescue Exception
+    end
+
+    def header
+      quiet { header_now }
+    end
+
+    def header_now
+      eng = (AnyPlayCheats.engine rescue "?")
+      gt  = (System.game_title rescue "?") rescue "?"
+      raw("==== AnyPlay log (plugin #{VERSION}) #{Time.now.strftime('%Y-%m-%d %H:%M:%S')} ====")
+      raw("game=#{clean(gt, 80)} folder=#{Dir.pwd} engine=#{eng} ruby=#{RUBY_VERSION} #{RUBY_PLATFORM}")
+      raw("screen=#{(Graphics.width rescue '?')}x#{(Graphics.height rescue '?')} fps=#{(Graphics.frame_rate rescue '?')} scripts=#{($RGSS_SCRIPTS.size rescue '?')}")
+    end
+
+    def start
+      return if @started
+      @started = true
+      (File.delete(FILE) if File.exist?(FILE) && File.size(FILE) > 200_000) rescue nil
+      raw("") if (File.exist?(FILE) && File.size(FILE) > 0) rescue nil
+      header
+      unless @notes.empty?
+        raw("-- notes from before the first error --")
+        @notes.each { |n| raw(n) }
+        @notes = []
+      end
+    end
+
+    def context
+      quiet { context_now }
+    end
+
+    def context_now
+      scene = (defined?(SceneManager) && SceneManager.respond_to?(:scene) ? SceneManager.scene : $scene).class rescue "?"
+      map = ($game_map.map_id rescue "-")
+      "scene=#{scene} map=#{map} frame=#{(Graphics.frame_count rescue '?')}"
+    end
+
+    # Context notes (touch / slow frames). They do not create the file by
+    # themselves; they are written once a real error shows up.
+    def write(msg, kind = :note)
+      line = "[#{stamp}] #{clean(msg, 600)}"
+      if @started
+        return if (@cnt[:note] += 1) > CAPS[:note]
+        raw(line)
+      else
+        @notes << line
+        @notes.shift while @notes.size > 60
+      end
+    end
+
+    def slow(msg)
+      @slow += 1
+      write("slow: " + msg)
+      start if @slow == 15   # slowness that keeps happening is worth a file
+    end
+
+    # A real problem. Always creates the file.
+    def error(msg)
+      return if (@cnt[:error] += 1) > CAPS[:error]
+      start
+      raw("[#{stamp}] #{clean(msg, 1500)}")
+    end
+
+    def script_errors(errs, compat = "")
+      return if errs.nil? || errs.empty?
+      start
+      raw("[#{stamp}] #{errs.size} script(s) could not be parsed (compat #{compat}):")
+      raw(clean(errs.join("\n\n"), 60_000))
+    end
+
+    BUG = [NoMethodError, TypeError, ArgumentError, ZeroDivisionError, FloatDomainError,
+           RangeError, IndexError, EncodingError, NotImplementedError, LocalJumpError, SyntaxError]
+
+    def bug?(e)
+      return true if BUG.any? { |k| e.is_a?(k) }
+      return true if Object.const_defined?(:RGSSError) && e.is_a?(Object.const_get(:RGSSError))
+      false
+    end
+
+    def on_raise(tp)
+      return if @internal > 0
+      e = tp.raised_exception
+      cname = e.class.name.to_s
+      return if cname =~ IGNORE
+      bt = (e.backtrace || [])
+      first = bt.first.to_s
+      msg = clean(e.message, 300)
+      key = "#{cname}|#{msg[0, 80]}|#{first}"
+      c = (@seen[key] = (@seen[key] || 0) + 1)
+      line = "#{cname}: #{msg} @ #{label(first)}"
+      @ring << "[#{stamp}] #{line}" if c == 1
+      @ring.shift while @ring.size > 14
+      return unless bug?(e)
+      if c == 1
+        err = "#{line}  (#{quiet { context }})"
+        bt[1, 5].to_a.each { |l| err << "\n      from #{label(l)}" }
+        err << "\n      (the game may have handled this one itself)"
+        error(err)
+      elsif [10, 100, 1000, 10000].include?(c)
+        error("#{line} -- happened #{c} times")
+      end
+    rescue Exception
+    end
+
+    # Called once, from the Graphics.update wrapper (after the game has loaded).
+    def watch
+      return if @watching
+      @watching = true
+      @tp = TracePoint.new(:raise) { |tp| on_raise(tp) }
+      @tp.enable
+    rescue Exception
+    end
+
+    # The error that stopped the game (called from the engine).
+    def fatal(exc)
+      @internal = 1
+      start
+      raw("")
+      raw("[#{stamp}] ##### GAME STOPPED BY AN ERROR #####")
+      raw("#{exc.class}: #{clean(exc.message, 800)}")
+      raw(context)
+      (exc.backtrace || []).first(40).each { |l| raw("   at #{label(l)}") }
+      unless @ring.empty?
+        raw("-- recent errors before it --")
+        @ring.each { |l| raw(l) }
+      end
+    rescue Exception
+    end
   end
 end
 
@@ -1984,13 +2171,14 @@ module AnyPlayCheats
 
   class << self
     attr_accessor :battle
+    attr_reader :speed
 
     # ---------------------------------------------------------------- engine
     # :essentials = Pokemon Essentials (v17-v19 style, and v20/v21 style),
     # :xp / :vx / :ace = plain RPG Maker XP / VX / VX Ace games.
     def engine
       return @engine if @engine
-      if defined?(PokeBattle_Battle) && defined?(PokemonBag) && defined?(PokeBattle_Pokemon)
+      if defined?(PokeBattle_Battle) && defined?(PokemonBag) && (defined?(PokeBattle_Pokemon) || defined?(Pokemon))
         @engine = :essentials
         @ess21 = false
       elsif defined?(Battle) && defined?(Pokemon) && defined?(PokemonBag) && defined?(GameData)
@@ -2011,6 +2199,14 @@ module AnyPlayCheats
 
     def ess?; engine == :essentials; end
     def ess21?; ess? && @ess21; end
+    # Items and species are looked up by name (symbols) in Essentials v19 and
+    # newer, and by number (PBItems / PBSpecies) in v17 and older.
+    def gd?
+      return @gd unless @gd.nil?
+      @gd = (ess? && defined?(GameData::Item) && GameData::Item.respond_to?(:each)) ? true : false
+    rescue Exception
+      false
+    end
     def rpgm?; [:xp, :vx, :ace].include?(engine); end
 
     def on?(name); @on[name] ? true : false; end
@@ -2034,8 +2230,18 @@ module AnyPlayCheats
     end
 
     # Essentials: the player object, the bag, and the party (v17 and v21 names)
-    def trainer; ess21? ? $player : $Trainer; end
-    def bag; ess21? ? $bag : $PokemonBag; end
+    def trainer; $player || $Trainer; end
+    def bag; $bag || $PokemonBag; end
+    def bag_add(id, q)
+      bag.respond_to?(:add) ? bag.add(id, q) : bag.pbStoreItem(id, q)
+    end
+    def bag_qty(id)
+      bag.respond_to?(:quantity) ? bag.quantity(id) : bag.pbQuantity(id)
+    end
+    def key_item?(i)
+      if i.respond_to?(:is_key_item?) then i.is_key_item?
+      else (pbIsKeyItem?(i) rescue false) end
+    end
 
     def pokes
       t = trainer
@@ -2084,7 +2290,7 @@ module AnyPlayCheats
     end
 
     def max_level
-      if ess21?
+      if gd?
         (GameData::GrowthRate.max_level rescue Settings::MAXIMUM_LEVEL)
       else
         PBExperience::MAXLEVEL
@@ -2092,7 +2298,7 @@ module AnyPlayCheats
     end
 
     def max_exp_of(p)
-      if ess21?
+      if gd?
         p.growth_rate.maximum_exp
       else
         PBExperience.pbGetMaxExperience(p.growthrate)
@@ -2113,7 +2319,7 @@ module AnyPlayCheats
       end
     rescue Exception => e
       where = (e.backtrace || []).find { |l| l !~ /anyplay|\(eval/i }.to_s[0, 60]
-      AnyPlayLog.write("cheat #{cmd} #{a} #{b} failed: #{e.class}: #{e.message}\n  #{(e.backtrace || []).first(8).join("\n  ")}") rescue nil
+      AnyPlayLog.error("cheat #{cmd} #{a} #{b} failed: #{e.class}: #{e.message}\n  #{(e.backtrace || []).first(8).join("\n  ")}") rescue nil
       "Cheat failed: #{e.class}: #{e.message[0, 70]} (#{where})"
     end
 
@@ -2303,9 +2509,9 @@ module AnyPlayCheats
       case kind
       when 'item'
         return "Bag isn't ready yet. Start or load a game first." unless bag
-        if ess21?
+        if gd?
           sym = key.to_sym
-          ok = bag.add(sym, qty)
+          ok = bag_add(sym, qty)
           ok ? "Added #{qty} x #{GameData::Item.get(sym).name}" : "Your bag is full or doesn't accept this item."
         else
           id = key.to_i
@@ -2315,7 +2521,7 @@ module AnyPlayCheats
       when 'pokemon'
         return "Trainer data isn't ready yet. Start or load a game first." unless trainer
         lv = [[qty, 1].max, max_level].min
-        sp = ess21? ? key.to_sym : key.to_i
+        sp = gd? ? key.to_sym : key.to_i
         r = pbAddPokemonSilent(sp, lv)
         r ? "Pokemon added (level #{lv})" : "Couldn't add it. Your party and storage may be full."
       else
@@ -2361,7 +2567,7 @@ module AnyPlayCheats
       out = []
       case engine
       when :essentials
-        if ess21?
+        if gd?
           GameData::Item.each do |i|
             n = i.name.to_s
             out << "item\t#{i.id}\t#{n}" unless n.empty?
@@ -2464,11 +2670,11 @@ module AnyPlayCheats
       case engine
       when :essentials
         return "Bag isn't ready yet. Start or load a game first." unless bag
-        if ess21?
+        if gd?
           GameData::Item.each do |i|
-            next if i.name.to_s.empty? || (i.is_key_item? rescue false)
-            have = (bag.quantity(i.id) rescue 0)
-            bag.add(i.id, 99 - have) if have < 99
+            next if i.name.to_s.empty? || key_item?(i)
+            have = (bag_qty(i.id) rescue 0)
+            bag_add(i.id, 99 - have) if have < 99
           end
         else
           (1..(PBItems.maxValue rescue 0)).each do |i|
@@ -2510,7 +2716,7 @@ module AnyPlayCheats
       apply unless @on.empty?
     rescue Exception => e
       @errors += 1
-      AnyPlayLog.write("cheats: #{e.class}: #{e.message}") rescue nil
+      AnyPlayLog.error("cheats: #{e.class}: #{e.message}") rescue nil
     end
 
     def poll
@@ -2524,7 +2730,7 @@ module AnyPlayCheats
       File.open(REPLY + ".tmp", "wb") { |f| f.write("#{id}\t#{reply}") }
       File.rename(REPLY + ".tmp", REPLY)
     rescue Exception => e
-      AnyPlayLog.write("cheats poll: #{e.class}: #{e.message}") rescue nil
+      AnyPlayLog.error("cheats poll: #{e.class}: #{e.message}") rescue nil
     end
 
     def apply
@@ -2569,7 +2775,8 @@ module AnyPlayCheats
       keep_items if on?('items')
       if on?('fastText') && defined?($PokemonSystem) && $PokemonSystem
         @old_textspeed = $PokemonSystem.textspeed if @old_textspeed.nil?
-        $PokemonSystem.textspeed = 2 if $PokemonSystem.textspeed != 2        # The game keeps its own copy of the speed (MessageConfig), so set that too.
+        $PokemonSystem.textspeed = 2 if $PokemonSystem.textspeed != 2
+        # The game keeps its own copy of the speed (MessageConfig), so set that too.
         if !@fast_text_set && defined?(MessageConfig) && MessageConfig.respond_to?(:pbSetTextSpeed)
           MessageConfig.pbSetTextSpeed(MessageConfig.pbSettingToTextSpeed(2))
           @fast_text_set = true
@@ -2633,11 +2840,7 @@ module AnyPlayCheats
         @item_snap.each do |id, q|
           cur = have[id].to_i
           next if cur >= q
-          if ess21?
-            bag.add(id, q - cur) rescue nil
-          else
-            bag.pbStoreItem(id, q - cur) rescue nil
-          end
+          (bag_add(id, q - cur) rescue nil)
         end
         have.each { |id, q| @item_snap[id] = q if q > (@item_snap[id] || 0) }
       else
@@ -2661,13 +2864,26 @@ module AnyPlayCheats
         Game_Character.class_eval do
           alias_method :__ap_cheat_update, :update
           def update(*args)
-            if AnyPlayCheats.speed_on? && $game_player && self.equal?($game_player) && @move_speed
-              saved = @move_speed
-              @move_speed = saved + AnyPlayCheats.speed_bonus
-              begin
-                return __ap_cheat_update(*args)
-              ensure
-                @move_speed = saved
+            if AnyPlayCheats.speed_on? && $game_player && self.equal?($game_player)
+              m = AnyPlayCheats.speed.to_f
+              m = 1.0 if m <= 0
+              # Games store the walking speed in different ways, so scale
+              # whichever one this game actually uses, for this frame only.
+              if instance_variable_defined?(:@move_speed_real) && @move_speed_real.is_a?(Numeric)
+                key = :@move_speed_real; saved = @move_speed_real; scaled = saved * m
+              elsif instance_variable_defined?(:@move_time) && @move_time.is_a?(Numeric)
+                key = :@move_time; saved = @move_time; scaled = saved / m
+              elsif @move_speed.is_a?(Numeric)
+                key = :@move_speed; saved = @move_speed; scaled = saved + AnyPlayCheats.speed_bonus
+              end
+              if key
+                instance_variable_set(key, scaled)
+                begin
+                  return __ap_cheat_update(*args)
+                ensure
+                  # keep a value the game set by itself during this frame
+                  instance_variable_set(key, saved) if instance_variable_get(key) == scaled
+                end
               end
             end
             __ap_cheat_update(*args)
@@ -2676,6 +2892,20 @@ module AnyPlayCheats
       end
 
       return unless engine == :essentials
+
+      # No random battles: Essentials v19+ asks encounter_triggered?, v17 asks
+      # pbCanEncounter? (which already respects the game's own switch).
+      if defined?(PokemonEncounters)
+        PokemonEncounters.class_eval do
+          if method_defined?(:encounter_triggered?)
+            alias_method :__ap_cheat_enc, :encounter_triggered?
+            def encounter_triggered?(enc_type, repel_active = false, triggered_by_step = true)
+              return false if triggered_by_step && AnyPlayCheats.on?('noEncounter')
+              __ap_cheat_enc(enc_type, repel_active, triggered_by_step)
+            end
+          end
+        end
+      end
 
       # class names differ: PokeBattle_* (older) / Battle::* (v20+)
       move_c   = ess21? ? Battle::Move    : (defined?(PokeBattle_Move) ? PokeBattle_Move : nil)
@@ -2784,7 +3014,7 @@ module AnyPlayPerf
     @gc_count = gc[:count]
     @gc_ms = gc[:time] || 0
     line = "t=#{((now - @t0)).round(1)}s script=#{script_ms}ms engine=#{engine_ms}ms layers=#{layer_ms}ms gc_runs=#{gcn} gc_ms=#{gct} at=#{where}"
-    File.__anyplay_open("AnyPlay_perf_log.txt", "a") { |f| f.puts(line) }
+    AnyPlayLog.slow(line)
   rescue Exception
   end
   def self.run(orig)
@@ -2792,11 +3022,17 @@ module AnyPlayPerf
     @t0 ||= t1
     script_ms = @last_end ? ((t1 - @last_end) * 1000).to_i : 0
     where = nil
-    where = (caller(2, 3) || []).map { |c| c[/[^\/]*\z/] }.join(" < ") if script_ms > 120
+    where = (caller(2, 3) || []).map { |c| AnyPlayLog.label(c) }.join(" < ") if script_ms > 120
+    AnyPlayLog.watch
     r = orig.call
     t2 = now
-    AnyPlayTouch.frame
-    AnyPlayCheats.frame
+    AnyPlayLog.internal += 1
+    begin
+      AnyPlayTouch.frame
+      AnyPlayCheats.frame
+    ensure
+      AnyPlayLog.internal -= 1
+    end
     t3 = now
     engine_ms = ((t2 - t1) * 1000).to_i
     layer_ms = ((t3 - t2) * 1000).to_i
@@ -2829,8 +3065,17 @@ end
 #else
     VALUE exc = rb_gv_get("$!");
 #endif
-    if (!NIL_P(exc) && !rb_obj_is_kind_of(exc, rb_eSystemExit))
+    if (!NIL_P(exc) && !rb_obj_is_kind_of(exc, rb_eSystemExit)) {
+#ifdef __ANDROID__
+        // AnyPlay: write the final error (with its call chain) to AnyPlayLog.txt first
+        rb_gv_set("$__anyplay_fatal", exc);
+        int fatalState = 0;
+        rb_eval_string_protect("AnyPlayLog.fatal($__anyplay_fatal) if defined?(AnyPlayLog)", &fatalState);
+        if (fatalState)
+            rb_set_errinfo(Qnil);
+#endif
         showExc(exc, btData);
+    }
     
     ruby_cleanup(0);
     
