@@ -1,242 +1,44 @@
-# mkxp-z Android Reworked
+# AnyPlay RGSS Plugin
 
-[![Android Build](https://github.com/BookerRues9/mkxp-z-android-reworked/workflows/Android%20Build%20%26%20Release/badge.svg)](https://github.com/BookerRues9/mkxp-z-android-reworked/actions/workflows/android.yml)
-[![GitHub downloads](https://img.shields.io/github/downloads/BookerRues9/mkxp-z-android-reworked/total)](https://github.com/BookerRues9/mkxp-z-android-reworked/releases)
-[![GitHub stars](https://img.shields.io/github/stars/BookerRues9/mkxp-z-android-reworked?style=social)](https://github.com/BookerRues9/mkxp-z-android-reworked/stargazers)
-[![GitHub forks](https://img.shields.io/github/forks/BookerRues9/mkxp-z-android-reworked?style=social)](https://github.com/BookerRues9/mkxp-z-android-reworked/network/members)
-[![GitHub issues](https://img.shields.io/github/issues/BookerRues9/mkxp-z-android-reworked)](https://github.com/BookerRues9/mkxp-z-android-reworked/issues)
-[![Last Commit](https://img.shields.io/github/last-commit/BookerRues9/mkxp-z-android-reworked)](https://github.com/BookerRues9/mkxp-z-android-reworked/commits/main)
+A small companion app for **AnyPlay**. It runs **RPG Maker XP, VX and VX Ace** games (the "RGSS" / Ruby ones) on Android. It has no icon of its own: you add the game in AnyPlay, press play, and AnyPlay opens this plugin for you.
 
-Android port of [mkxp-z](https://github.com/mkxp-z/mkxp-z) focused on running RPG Maker XP games on Android devices.
+It is built on [mkxp-z](https://github.com/mkxp-z/mkxp-z), using the Android port [BookerRues9/mkxp-z-android-reworked](https://github.com/BookerRues9/mkxp-z-android-reworked) as the starting point.
 
----
+> This plugin is only distributed here, through the **Releases** page of this repository.
 
-## Overview
+## Install
 
-`mkxp-z Android Reworked` is an experimental Android port of the mkxp-z engine.  
-The project aims to provide compatibility for RPG Maker XP games using native Android builds.
+1. Open the [latest release](../../releases/latest) and download **`AnyPlay-RGSS-Plugin.apk`**
+   (direct link: `https://github.com/001-lovely-singh/AnyPlay-Plugin-RGSS/releases/latest/download/AnyPlay-RGSS-Plugin.apk`).
+2. Open the file and allow "Install unknown apps" for your browser or file manager if Android asks.
+3. Open AnyPlay, add an RPG Maker game (a folder, or a `.zip`), and press play.
 
-Although still experimental, many games are already playable.
+New versions install over the old one. Nothing needs to be uninstalled.
 
----
+## What it includes
 
-## Project Information
+- One APK for 64-bit and 32-bit phones (arm64-v8a and armeabi-v7a).
+- Touch controls: tap the map to walk, on-screen pad and buttons.
+- Cheat menu (opened from the AnyPlay overlay) for XP / VX / VX Ace and for Pokémon Essentials games (v17, v19, v21 style).
+- Fixes for old scripts. Many games were written for Ruby 1.8; the plugin repairs the common problems automatically when the game starts, so the game does not need to be edited.
+- `AnyPlayLog.txt`, a problem report written into the game folder (see below).
 
-| Component | Status |
-|---|---|
-| RPG Maker XP Support | ✅ |
-| Android ARM64 | ✅ |
-| Android ARMv7 | ✅ |
-| OpenGL ES Rendering | ✅ |
-| SDL Integration | ✅ |
-| Ruby Runtime | ✅ |
-| APK Builds | ✅ |
-| 16KB Page Support | ⚠️ Experimental |
+## If a game does not work
 
----
+When something goes wrong, the plugin writes a file called **`AnyPlayLog.txt`** into the game's folder. The file is created fresh every time the game is started, and only if there is something to report. It lists script errors, the error that stopped the game (with the script name and line), and, if the game runs slowly, which part is slow.
 
-## Original Projects
+Please open an issue and attach that file, together with the game name and your phone model.
 
-| Project | Link |
-|---|---|
-| mkxp-z | https://github.com/mkxp-z/mkxp-z |
-| Original Android Port | https://github.com/thehatkid/mkxp-z-android |
+## Build it yourself
 
----
+The APK is built by GitHub Actions (`.github/workflows/android.yml`) whenever a tag like `v1.0.41` is pushed. The result is attached to the release as `AnyPlay-RGSS-Plugin.apk`.
 
-# Running mkxp-z on Android
+The release is signed with a key that is kept in the repository secrets (`ANYPLAY_KEYSTORE_BASE64`, `ANYPLAY_STORE_PASSWORD`, `ANYPLAY_KEY_ALIAS`, `ANYPLAY_KEY_PASSWORD`). If you fork this repository without those secrets, the build still works and is signed with a temporary debug key.
 
-## Installation Steps
+## Credits and license
 
-| Step | Description |
-|---|---|
-| 1 | Install the APK on your Android device |
-| 2 | Create the `mkxp-z` folder in internal storage |
-| 3 | Copy your RPG Maker XP game files into the folder |
-| 4 | Optional: configure `mkxp.json` |
-| 5 | Launch the app and grant storage permissions |
+- mkxp-z and its contributors.
+- [BookerRues9](https://github.com/BookerRues9) for the Android port this project started from.
+- Ruby, SDL2, OpenAL Soft and the other libraries bundled in the build keep their own licenses.
 
-Example storage path:
-```txt
-/storage/emulated/0/mkxp-z
-```
-
-
-# Build Guide
-
-This section explains how to configure and build **mkxp-z Android Reworked** from source.
-
----
-
-# Configuration
-
-You can place a custom configuration file here:
-
-```txt
-app/jni/mkxp-z/mkxp.json
-```
-
-## Possible Uses
-
-| Feature | Description |
-|---|---|
-| Custom Game Directory | Load games from custom storage paths |
-| Script Preloading | Automatically preload Ruby scripts |
-| External Storage Paths | Configure storage locations |
-| Engine Tweaks | Modify engine behavior and settings |
-
----
-
-# Build Environment
-
-## Requirements
-
-| Dependency | Version |
-|---|---|
-| Ubuntu | 22.04 |
-| Android Studio | Latest |
-| Android SDK | Installed |
-| Android NDK | 23.2.8568313 |
-| Ruby | 3.0+ |
-| CMake | Installed |
-| Build Tools | Installed |
-
----
-
-# Environment Setup
-
-## Install Dependencies
-
-```bash
-sudo apt update
-sudo apt install build-essential cmake ruby-full
-```
-
----
-
-## Install RVM
-
-```bash
-sudo apt install curl gpg -y
-curl -sSL https://get.rvm.io/ | bash
-source ~/.rvm/scripts/rvm
-```
-
----
-
-## Install Ruby
-
-```bash
-rvm install 3.1
-rvm use 3.1 --default
-ruby -v
-```
-
----
-
-# Clone Repository
-
-```bash
-git clone https://github.com/BookerRues9/mkxp-z-android-reworked.git
-cd mkxp-z-android-reworked/app/jni
-```
-
----
-
-# Download Dependencies
-
-```bash
-chmod +x get_deps.sh
-./get_deps.sh
-```
-
----
-
-# Android Environment Variables
-
-```bash
-export ANDROID_HOME=/home/YOURUSER/Android/Sdk
-export ANDROID_NDK_HOME=$ANDROID_HOME/ndk/23.2.8568313
-export ARCH=linux-x86_64
-export PATH=$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$ARCH/bin:$PATH
-```
-
----
-
-# Build Instructions
-
-## ARMv7 Build
-
-```bash
-HOST=armv7a-linux-androideabi \
-TARGET=arm-linux-androideabi \
-ABI=armeabi-v7a \
-make
-```
-
----
-
-## ARM64 Build
-
-```bash
-HOST=aarch64-linux-android \
-TARGET=aarch64-linux-android \
-ABI=arm64-v8a \
-make
-```
-
----
-
-## Build Everything
-
-```bash
-make
-```
-
----
-
-# Android Studio
-
-After compiling dependencies:
-
-| Step | Action |
-|---|---|
-| 1 | Open the project in Android Studio |
-| 2 | Sync Gradle |
-| 3 | Build APK |
-| 4 | Install on device |
-
----
-
-# Known Issues
-
-| Issue | Status |
-|---|---|
-| External SD save support on Android < 10 | ❌ |
-| Windows MSYS2 Ruby extensions | ⚠️ |
-| 16KB Android page support | Experimental |
-| Some RPG Maker XP games | Partial compatibility |
-
----
-
-# Roadmap
-
-- Improve Android compatibility
-- Modernize native toolchains
-- Improve Ruby extension support
-- Better performance
-- Improve ARM64 support
-- Investigate 16KB page compatibility
-
----
-
-# Notes
-
-- ARM64 builds are recommended for modern Android devices.
-- Some RPG Maker XP games may require additional configuration.
-- Android storage permissions may vary depending on Android version.
-- Experimental support means some features may still be unstable.
-
----
-
-Last updated: May 2026
+This project is licensed under the **GNU General Public License v2** (see [`app/jni/mkxp-z/COPYING`](app/jni/mkxp-z/COPYING)). The complete source of every release is this repository, at the release's tag.
