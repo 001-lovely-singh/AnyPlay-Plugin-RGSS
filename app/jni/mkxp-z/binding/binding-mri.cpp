@@ -1622,15 +1622,27 @@ end
 # while a map loads (every name is tried with several endings), and most answers
 # are "no". On a phone every such question is a slow trip to the storage. Instead
 # the folder is listed once (one trip) and the answers come from that list.
-# The list is refreshed every 15 seconds, so files that appear later are found.
+# The list is refreshed every 10 minutes, so files that appear later are found.
 # Only the read-only resource folders are handled this way.
 module AnyPlayFastFiles
   RES = /\A(?:\.\/)?(?:Graphics|Audio|Fonts)\//i
-  TTL = 15
+  TTL = 600
+  @lists = 0
+  @list_ms = 0.0
   @dirs = {}     # "Graphics/Battlers" => [time, {name => true}]
   @yes = {}      # "Graphics/Battlers/1.png" => answer of the real call
   class << self
     attr_reader :dirs, :yes
+    def take_stats
+      r = "dirlists=#{@lists} dirlist_ms=#{@list_ms.to_i}"
+      @lists = 0
+      @list_ms = 0.0
+      r
+    end
+    def count_list(ms)
+      @lists += 1
+      @list_ms += ms
+    end
   end
   def self.now
     Process.clock_gettime(Process::CLOCK_MONOTONIC)
@@ -1639,11 +1651,13 @@ module AnyPlayFastFiles
     e = @dirs[dir]
     return e[1] if e && (now - e[0]) < TTL
     names = {}
+    t0 = now
     begin
       Dir.children(dir).each { |n| names[n] = true }
     rescue Exception
       names = {}
     end
+    count_list((now - t0) * 1000.0)
     @dirs.clear if @dirs.size > 400
     @dirs[dir] = [now, names]
     names
@@ -1691,7 +1705,7 @@ end
 # catches itself - those are marked), (3) the final error that stopped the game
 # with the full call chain, and (4) a few notes (touch / slow frames) for context.
 module AnyPlayLog
-  VERSION   = "0.1.30"
+  VERSION   = "0.1.31"
   FILE      = "AnyPlayLog.txt"
   MAX_BYTES = 250_000
   CAPS      = { error: 200, note: 120 }
@@ -3159,13 +3173,26 @@ module AnyPlayPerf
     gct = (gc[:time] || 0) - @w_gcms
     @w_gc = gc[:count]; @w_gcms = gc[:time] || 0
     if fps < target * 0.9 || @w_o50 > 8
-      AnyPlayLog.slow("window: fps=#{fps.round(1)}/#{target.to_i} frames>50ms=#{@w_o50} frames>100ms=#{@w_o100} worst=#{@w_max.to_i}ms script_avg=#{(@w_script / @w_frames).round(1)}ms engine_avg=#{(@w_engine / @w_frames).round(1)}ms gc_runs=#{gcn} gc_ms=#{gct} #{AnyPlayLog.context}", 5)
+      AnyPlayLog.slow("window: fps=#{fps.round(1)}/#{target.to_i} frames>50ms=#{@w_o50} frames>100ms=#{@w_o100} worst=#{@w_max.to_i}ms script_avg=#{(@w_script / @w_frames).round(1)}ms engine_avg=#{(@w_engine / @w_frames).round(1)}ms gc_runs=#{gcn} gc_ms=#{gct} #{AnyPlayFastFiles.take_stats} #{AnyPlayLog.context}", 5)
       AnyPlayLog.slow(top_samples, 0)
     else
       @samples = Hash.new(0)
     end
     @w_frames = 0; @w_time = 0.0; @w_script = 0.0; @w_engine = 0.0
     @w_o50 = 0; @w_o100 = 0; @w_max = 0.0
+  rescue Exception
+  end
+  # Things that can only be decided once the game's scripts have loaded.
+  def self.late_shims
+    return if @late
+    @late = true
+    AnyPlayLog.quiet do
+      # Ruby 1.8 had Object#id; games for Essentials v17 and older rely on
+      # "nil.id" quietly giving a number instead of an error.
+      if defined?(PBMoves) && !(defined?(GameData) && defined?(GameData::Move)) && !nil.respond_to?(:id)
+        NilClass.class_eval { def id; 4; end }
+      end
+    end
   rescue Exception
   end
   def self.run(orig)
@@ -3176,6 +3203,7 @@ module AnyPlayPerf
     where = (caller(2, 3) || []).map { |c| AnyPlayLog.label(c) }.join(" < ") if script_ms > 120
     AnyPlayLog.watch
     start_sampler
+    late_shims
     r = orig.call
     t2 = now
     AnyPlayLog.internal += 1
