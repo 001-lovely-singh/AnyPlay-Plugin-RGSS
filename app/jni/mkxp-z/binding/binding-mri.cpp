@@ -1706,7 +1706,7 @@ end
 # catches itself - those are marked), (3) the final error that stopped the game
 # with the full call chain, and (4) a few notes (touch / slow frames) for context.
 module AnyPlayLog
-  VERSION   = "0.1.32"
+  VERSION   = "0.1.33"
   FILE      = "AnyPlayLog.txt"
   MAX_BYTES = 250_000
   CAPS      = { error: 200, note: 120 }
@@ -1764,11 +1764,15 @@ module AnyPlayLog
 
     # the game's own code line (and the one before it) for "Section044 <X>:749:in ..."
     def snippet(l)
-      return nil unless l.to_s =~ /\A(Section\d+)[^:]*:(\d+)/
-      src = ($__anyplay_src || {})[$1]
+      l = l.to_s
+      src = $__anyplay_src
       return nil unless src
-      n = $2.to_i
-      rows = src.split("\n", -1)
+      key = nil
+      src.each_key { |k| key = k if l.start_with?(k + ":") && (key.nil? || k.length > key.length) }
+      return nil unless key
+      return nil unless l[(key.length + 1)..-1] =~ /\A(\d+)/
+      n = $1.to_i
+      rows = src[key].split("\n", -1)
       return nil if n < 1 || n > rows.size
       out = []
       out << "        #{n - 1}| " + clean(rows[n - 2].to_s.strip, 160) if n >= 2
@@ -3220,6 +3224,10 @@ module AnyPlayPerf
             c = __anyplay_getc
             c.is_a?(String) ? c.getbyte(0) : c
           end
+        end
+        # Ruby 3.x Marshal.load(port) needs getbyte + read on the port object
+        unless StringInput.method_defined?(:getbyte)
+          StringInput.class_eval { def getbyte; getc; end }
         end
       end
       # Ruby 1.8 had Object#id; games for Essentials v17 and older rely on
