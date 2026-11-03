@@ -1169,6 +1169,7 @@ lambda { |s, name|
         ($__anyplay_syntax_errors ||= []) << "[#{name}]\n" + detail.first(24).join("\n")
       end
     end
+    ($__anyplay_src ||= {})[name.to_s] = s
     s
   rescue Exception
     s
@@ -1705,7 +1706,7 @@ end
 # catches itself - those are marked), (3) the final error that stopped the game
 # with the full call chain, and (4) a few notes (touch / slow frames) for context.
 module AnyPlayLog
-  VERSION   = "0.1.31"
+  VERSION   = "0.1.32"
   FILE      = "AnyPlayLog.txt"
   MAX_BYTES = 250_000
   CAPS      = { error: 200, note: 120 }
@@ -1759,6 +1760,22 @@ module AnyPlayLog
       else
         l
       end
+    end
+
+    # the game's own code line (and the one before it) for "Section044 <X>:749:in ..."
+    def snippet(l)
+      return nil unless l.to_s =~ /\A(Section\d+)[^:]*:(\d+)/
+      src = ($__anyplay_src || {})[$1]
+      return nil unless src
+      n = $2.to_i
+      rows = src.split("\n", -1)
+      return nil if n < 1 || n > rows.size
+      out = []
+      out << "        #{n - 1}| " + clean(rows[n - 2].to_s.strip, 160) if n >= 2
+      out << "      > #{n}| " + clean(rows[n - 1].to_s.strip, 200)
+      out.join("\n")
+    rescue Exception
+      nil
     end
 
     def raw(line)
@@ -1863,6 +1880,8 @@ module AnyPlayLog
       return unless bug?(e)
       if c == 1
         err = "#{line}  (#{quiet { context }})"
+        sn = snippet(first)
+        err << "\n" + sn if sn
         bt[1, 5].to_a.each { |l| err << "\n      from #{label(l)}" }
         err << "\n      (the game may have handled this one itself)"
         error(err)
@@ -1889,7 +1908,12 @@ module AnyPlayLog
       raw("[#{stamp}] ##### GAME STOPPED BY AN ERROR #####")
       raw("#{exc.class}: #{clean(exc.message, 800)}")
       raw(context)
-      (exc.backtrace || []).first(40).each { |l| raw("   at #{label(l)}") }
+      (exc.backtrace || []).first(40).each_with_index do |l, i|
+        raw("   at #{label(l)}")
+        if i < 4 && (sn = snippet(l))
+          raw(sn)
+        end
+      end
       unless @ring.empty?
         raw("-- recent errors before it --")
         @ring.each { |l| raw(l) }
@@ -3187,6 +3211,17 @@ module AnyPlayPerf
     return if @late
     @late = true
     AnyPlayLog.quiet do
+      # Ruby 1.8: StringInput#getc gave the byte NUMBER; newer Ruby gives a 1-letter string
+      # (fgetdw / fgetw then fail with "String can't be coerced into Integer").
+      if defined?(StringInput) && StringInput.method_defined?(:getc) && !StringInput.method_defined?(:__anyplay_getc)
+        StringInput.class_eval do
+          alias_method :__anyplay_getc, :getc
+          def getc
+            c = __anyplay_getc
+            c.is_a?(String) ? c.getbyte(0) : c
+          end
+        end
+      end
       # Ruby 1.8 had Object#id; games for Essentials v17 and older rely on
       # "nil.id" quietly giving a number instead of an error.
       if defined?(PBMoves) && !(defined?(GameData) && defined?(GameData::Move)) && !nil.respond_to?(:id)
