@@ -1080,6 +1080,9 @@ lambda { |s, name|
     # so "comparison of String with 6 failed" when a Pokemon was created).
     # Same thing for "file.read(1)[0]" (first byte as a number in Ruby 1.8)
     s = s.gsub(/\.read\(\s*(\d+)\s*\)\[0\]/) { ".read(#{$1}).getbyte(0)" } if s.include?(".read(")
+    # Ruby 1.8: "x.split('').map" (no block) gave an Array; newer Ruby gives an Enumerator,
+    # so x[0] fails. Only after split/scan/chars/... so attributes like "spriteset.map" stay as they are.
+    s = s.gsub(/(\.(?:split|scan|each_char|each_byte)\([^()\n]*\)|\.(?:chars|bytes|keys|values|to_a))\.(?:map|collect)(?=[ \t]*(?:;|#[^\n]*)?\r?$)/) { "#{$1}.to_a" } if s.include?("map") || s.include?("collect")
     # BOM check ("line[0]==0xEF") and the MP3 header scan ("rstr[0]==0xFB"): in Ruby 1.8 str[i] was a number,
     # now it is text and never equal. __anyplay_byte gives the number for strings.
     s = s.gsub(/(?<![.\w@$\])])(line|rstr)\[(\w+)\][ \t]*(==|!=|<=|>=|<|>)[ \t]*(0x[0-9A-Fa-f]+)\b/) { "__anyplay_byte(#{$1},#{$2})#{$3}#{$4}" } if s =~ /\]\s*(?:==|!=|<=|>=|<|>)\s*0x/
@@ -1706,7 +1709,7 @@ end
 # catches itself - those are marked), (3) the final error that stopped the game
 # with the full call chain, and (4) a few notes (touch / slow frames) for context.
 module AnyPlayLog
-  VERSION   = "0.1.34"
+  VERSION   = "0.1.36"
   FILE      = "AnyPlayLog.txt"
   MAX_BYTES = 250_000
   CAPS      = { error: 200, note: 120 }
@@ -2034,8 +2037,8 @@ module AnyPlayMenu
       nil
     end
 
-    # [steps, vertical?] to move the highlight from the current panel to the tapped one
-    def panel_steps(gx, gy)
+    # Sprites that look like menu panels (they have "selected"): [sprite, x, y, w, h], top to bottom.
+    def collect_panels
       panels = []
       each_obj(%w(Sprite SpriteWrapper)) do |s|
         begin
@@ -2047,23 +2050,64 @@ module AnyPlayMenu
           vx, vy = vp_off(s)
           zx = (s.zoom_x rescue 1.0)
           zy = (s.zoom_y rescue 1.0)
-          x = s.x - s.ox * zx + vx
-          y = s.y - s.oy * zy + vy
-          panels << [s, x, y, bm.width * zx, bm.height * zy]
+          sr = (s.src_rect rescue nil)
+          sw = sr && sr.width > 0 ? sr.width : bm.width
+          sh = sr && sr.height > 0 ? sr.height : bm.height
+          panels << [s, s.x - s.ox * zx + vx, s.y - s.oy * zy + vy, sw * zx, sh * zy]
         rescue Exception
         end
       end
-      return nil if panels.size < 2
-      panels.sort_by! { |p| [p[2], p[1]] }
-      cur = panels.index { |p| (p[0].selected rescue false) }
-      hit = panels.index { |p| gx >= p[1] && gx < p[1] + p[3] && gy >= p[2] && gy < p[2] + p[4] }
-      return nil unless cur && hit
-      vertical = (panels.last[2] - panels.first[2]).abs >= (panels.last[1] - panels.first[1]).abs
-      [hit - cur, vertical]
+      panels.sort_by { |p| [p[2], p[1]] }
     end
 
-    # nil = nothing found (caller just confirms), :confirm = highlight already moved,
-    # Array = buttons to press one per frame (ends with Input::C)
+    # Does the tap land on a visible (not see-through) pixel of this panel?
+    # (the panel bitmaps can be taller than what is drawn, so the box alone is not enough)
+    def opaque_at?(p, gx, gy)
+      s = p[0]
+      bm = s.bitmap
+      zx = (s.zoom_x rescue 1.0)
+      zy = (s.zoom_y rescue 1.0)
+      sr = (s.src_rect rescue nil)
+      lx = ((gx - p[1]) / zx).to_i + (sr ? sr.x : 0)
+      ly = ((gy - p[2]) / zy).to_i + (sr ? sr.y : 0)
+      return false if lx < 0 || ly < 0 || lx >= bm.width || ly >= bm.height
+      bm.get_pixel(lx, ly).alpha > 0
+    rescue Exception
+      true
+    end
+
+    def panel_vertical?(panels)
+      (panels.last[2] - panels.first[2]).abs >= (panels.last[1] - panels.first[1]).abs
+    end
+
+    # One step of the "walk the highlight to the tapped panel" loop (called once per frame).
+    # Returns a button to press, :done (now confirm) or :abort.
+    def drive(st)
+      panels = collect_panels
+      return :abort if panels.size < 2
+      ti = panels.index { |p| p[0].equal?(st[:target]) }
+      ci = panels.index { |p| (p[0].selected rescue false) }
+      return :abort unless ti && ci
+      return :done if ti == ci
+      st[:steps] += 1
+      return :abort if st[:steps] > 30
+      st[:stall] = (st[:last] == ci ? st[:stall] + 1 : 0)
+      st[:last] = ci
+      return :abort if st[:stall] > 12
+      v = st[:vertical]
+      ti > ci ? (v ? Input::DOWN : Input::RIGHT) : (v ? Input::UP : Input::LEFT)
+    end
+
+    def debug(mx, my, gx, gy, panels)
+      return if (@dbg = (@dbg || 0) + 1) > 3
+      AnyPlayLog.start   # menu taps are being checked right now: make sure this goes into the file
+      list = panels.map { |p| "#{p[0].class}@#{p[1].to_i},#{p[2].to_i} #{p[3].to_i}x#{p[4].to_i}#{(p[0].selected rescue false) ? '*' : ''}" }
+      AnyPlayLog.write("  menu-debug: tap=#{mx},#{my} game=#{gx.to_i},#{gy.to_i} gfx=#{(Graphics.width rescue '?')}x#{(Graphics.height rescue '?')} resize=#{$ResizeFactor.inspect} off=#{$ResizeOffsetX.inspect},#{$ResizeOffsetY.inspect} panels=#{list.inspect}")
+    rescue Exception
+    end
+
+    # nil = nothing found (caller just confirms), :confirm = confirm now, :ignore = do nothing,
+    # Hash = walk the highlight to a panel first (see drive)
     def tap(mx, my)
       gx, gy = to_game(mx, my)
       w = window_at(gx, gy)
@@ -2074,16 +2118,21 @@ module AnyPlayMenu
         w.index = i unless w.index == i
         return :confirm
       end
-      st = panel_steps(gx, gy)
-      AnyPlayLog.write("  menu: no window at #{gx.to_i},#{gy.to_i}; panels step=#{st.inspect}")
-      return nil unless st
-      n, vertical = st
-      return :confirm if n == 0
-      back = vertical ? Input::UP : Input::LEFT
-      fwd  = vertical ? Input::DOWN : Input::RIGHT
-      keys = [n < 0 ? back : fwd] * n.abs
-      keys << Input::C
-      keys
+      panels = collect_panels
+      debug(mx, my, gx, gy, panels)
+      return nil if panels.size < 2
+      hits = panels.select { |p| gx >= p[1] && gx < p[1] + p[3] && gy >= p[2] && gy < p[2] + p[4] && opaque_at?(p, gx, gy) }
+      if hits.empty?
+        AnyPlayLog.write("  menu: tap is not on a panel, ignored")
+        return :ignore
+      end
+      hit = hits.max_by { |p| [(p[0].z rescue 0), panels.index(p)] }
+      ci = panels.index { |p| (p[0].selected rescue false) }
+      ti = panels.index(hit)
+      AnyPlayLog.write("  menu: panel #{ti} tapped, highlighted=#{ci.inspect}")
+      return nil unless ci
+      return :confirm if ci == ti
+      { target: hit[0], vertical: panel_vertical?(panels), steps: 0, stall: 0, last: nil }
     rescue Exception => e
       AnyPlayLog.write("  menu failed: #{e.class} #{e.message[0, 80]}")
       nil
@@ -2344,14 +2393,14 @@ module AnyPlayTouch
     end
 
     def on_tap(mx, my)
-      @route = []; @face = nil; @dir = nil; @expect = nil; @keys = []
+      @route = []; @face = nil; @dir = nil; @expect = nil; @keys = []; @pan = nil
       AnyPlayLog.write("tap #{mx},#{my} scene=#{(defined?(SceneManager) ? SceneManager.scene : $scene).class} free=#{map_free?} player=#{($game_player.x rescue '?')},#{($game_player.y rescue '?')}")
       unless map_free?
         diag_not_free
         r = AnyPlayMenu.tap(mx, my)     # menus: pick the tapped entry first
-        if r.is_a?(Array)
-          @keys = r; @key_age = 0
-        else
+        if r.is_a?(Hash)
+          @pan = r            # walk the highlight to that panel, then confirm (see tick)
+        elsif r != :ignore
           @press_c = 4        # dialogs, text, title: tap = confirm
         end
         return
@@ -2424,6 +2473,19 @@ module AnyPlayTouch
       unless @keys.empty?
         @key_age += 1
         @keys = [] if @key_age > 90
+      end
+      if @pan && @keys.empty?
+        k = AnyPlayMenu.drive(@pan)
+        if k == :done
+          @pan = nil
+          @press_c = 4
+        elsif k == :abort
+          AnyPlayLog.write("  menu: could not reach the tapped panel, gave up")
+          @pan = nil
+        else
+          @keys = [k]
+          @key_age = 0
+        end
       end
       if Input.respond_to?(:anyplay_tap_seq)
         seq = Input.anyplay_tap_seq
