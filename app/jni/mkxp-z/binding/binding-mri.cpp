@@ -1706,7 +1706,7 @@ end
 # catches itself - those are marked), (3) the final error that stopped the game
 # with the full call chain, and (4) a few notes (touch / slow frames) for context.
 module AnyPlayLog
-  VERSION   = "0.1.33"
+  VERSION   = "0.1.34"
   FILE      = "AnyPlayLog.txt"
   MAX_BYTES = 250_000
   CAPS      = { error: 200, note: 120 }
@@ -1823,7 +1823,7 @@ module AnyPlayLog
     def context_now
       scene = (defined?(SceneManager) && SceneManager.respond_to?(:scene) ? SceneManager.scene : $scene).class rescue "?"
       map = ($game_map.map_id rescue "-")
-      "scene=#{scene} map=#{map} frame=#{(Graphics.frame_count rescue '?')}"
+      "scene=#{scene} map=#{map} frame=#{(Graphics.frame_count rescue '?')} resize=#{($ResizeFactor rescue '?')}"
     end
 
     # Context notes (touch / slow frames). They do not create the file by
@@ -1918,11 +1918,175 @@ module AnyPlayLog
           raw(sn)
         end
       end
+      if exc.message.to_s =~ /mega/i
+        begin
+          ObjectSpace.each_object(Bitmap) { |b| raw("   mega bitmap: #{b.width}x#{b.height}") if !b.disposed? && b.mega? }
+        rescue Exception
+        end
+      end
       unless @ring.empty?
         raw("-- recent errors before it --")
         @ring.each { |l| raw(l) }
       end
     rescue Exception
+    end
+  end
+end
+
+# Tap on a menu: pick the tapped entry instead of confirming whatever is highlighted.
+#  - list windows (Window_Selectable / SpriteWindow_Selectable): set the window's index, then confirm
+#  - sprite panels with "selected" (Essentials load screen): press UP/DOWN to the tapped panel, then confirm
+module AnyPlayMenu
+  class << self
+    def to_game(mx, my)
+      f = ($ResizeFactor || 1.0).to_f
+      f = 1.0 if f <= 0
+      [mx / f - ($ResizeOffsetX || 0).to_f, my / f - ($ResizeOffsetY || 0).to_f]
+    end
+
+    def vp_off(o)
+      vp = o.viewport
+      return [0, 0] if vp.nil? || (vp.disposed? rescue false)
+      [vp.rect.x - vp.ox, vp.rect.y - vp.oy]
+    rescue Exception
+      [0, 0]
+    end
+
+    def pad(w)
+      if w.respond_to?(:startX) && w.respond_to?(:startY)
+        [w.startX, w.startY]
+      elsif w.respond_to?(:standard_padding)
+        [w.standard_padding, w.standard_padding]
+      elsif w.respond_to?(:borderX) && w.respond_to?(:borderY)
+        [w.borderX / 2, w.borderY / 2]
+      else
+        [16, 16]
+      end
+    rescue Exception
+      [16, 16]
+    end
+
+    def each_obj(names)
+      seen = {}
+      names.each do |n|
+        next unless Object.const_defined?(n)
+        k = Object.const_get(n)
+        next unless k.is_a?(Class)
+        ObjectSpace.each_object(k) do |o|
+          next if seen[o.object_id]
+          seen[o.object_id] = true
+          yield o
+        end
+      end
+    end
+
+    def item_rect(w, i)
+      if w.respond_to?(:itemRect)
+        [w.itemRect(i), true]
+      elsif w.respond_to?(:item_rect)
+        [w.item_rect(i), true]
+      else
+        cm = (w.instance_variable_get(:@column_max) || 1).to_i
+        cm = 1 if cm < 1
+        cw = w.width / cm - 32
+        [Rect.new(i % cm * (cw + 32), i / cm * 32 - w.oy, cw, 32), false]
+      end
+    end
+
+    def item_count(w)
+      n = (w.item_max rescue nil)
+      n = (w.itemCount rescue nil) unless n.is_a?(Integer)
+      n.is_a?(Integer) && n > 0 && n <= 300 ? n : nil
+    end
+
+    def window_at(gx, gy)
+      best = nil
+      each_obj(%w(Window SpriteWindow)) do |w|
+        begin
+          next if w.disposed?
+          next unless w.visible && w.active
+          next unless w.respond_to?(:index) && w.respond_to?(:index=)
+          vx, vy = vp_off(w)
+          wx = w.x + vx
+          wy = w.y + vy
+          next unless gx >= wx && gx < wx + w.width && gy >= wy && gy < wy + w.height
+          best = w if best.nil? || w.z >= best.z
+        rescue Exception
+        end
+      end
+      best
+    end
+
+    def pick_item(w, gx, gy)
+      n = item_count(w)
+      return nil unless n
+      px, py = pad(w)
+      vx, vy = vp_off(w)
+      ox = (w.ox rescue 0).to_i
+      oy = (w.oy rescue 0).to_i
+      n.times do |i|
+        r, scrolled = item_rect(w, i)
+        next if r.nil? || r.width <= 0 || r.height <= 0
+        x = w.x + vx + px + r.x - (scrolled ? ox : 0)
+        y = w.y + vy + py + r.y - (scrolled ? oy : 0)
+        return i if gx >= x && gx < x + r.width && gy >= y && gy < y + r.height
+      end
+      nil
+    end
+
+    # [steps, vertical?] to move the highlight from the current panel to the tapped one
+    def panel_steps(gx, gy)
+      panels = []
+      each_obj(%w(Sprite SpriteWrapper)) do |s|
+        begin
+          next unless s.respond_to?(:selected) && s.respond_to?(:selected=)
+          next if s.disposed?
+          next unless s.visible
+          bm = s.bitmap
+          next if bm.nil? || bm.disposed?
+          vx, vy = vp_off(s)
+          zx = (s.zoom_x rescue 1.0)
+          zy = (s.zoom_y rescue 1.0)
+          x = s.x - s.ox * zx + vx
+          y = s.y - s.oy * zy + vy
+          panels << [s, x, y, bm.width * zx, bm.height * zy]
+        rescue Exception
+        end
+      end
+      return nil if panels.size < 2
+      panels.sort_by! { |p| [p[2], p[1]] }
+      cur = panels.index { |p| (p[0].selected rescue false) }
+      hit = panels.index { |p| gx >= p[1] && gx < p[1] + p[3] && gy >= p[2] && gy < p[2] + p[4] }
+      return nil unless cur && hit
+      vertical = (panels.last[2] - panels.first[2]).abs >= (panels.last[1] - panels.first[1]).abs
+      [hit - cur, vertical]
+    end
+
+    # nil = nothing found (caller just confirms), :confirm = highlight already moved,
+    # Array = buttons to press one per frame (ends with Input::C)
+    def tap(mx, my)
+      gx, gy = to_game(mx, my)
+      w = window_at(gx, gy)
+      if w
+        i = pick_item(w, gx, gy)
+        AnyPlayLog.write("  menu: window #{w.class} index=#{(w.index rescue '?')} tapped_item=#{i.inspect}")
+        return nil unless i
+        w.index = i unless w.index == i
+        return :confirm
+      end
+      st = panel_steps(gx, gy)
+      AnyPlayLog.write("  menu: no window at #{gx.to_i},#{gy.to_i}; panels step=#{st.inspect}")
+      return nil unless st
+      n, vertical = st
+      return :confirm if n == 0
+      back = vertical ? Input::UP : Input::LEFT
+      fwd  = vertical ? Input::DOWN : Input::RIGHT
+      keys = [n < 0 ? back : fwd] * n.abs
+      keys << Input::C
+      keys
+    rescue Exception => e
+      AnyPlayLog.write("  menu failed: #{e.class} #{e.message[0, 80]}")
+      nil
     end
   end
 end
@@ -1933,6 +2097,9 @@ module AnyPlayTouch
   @face = nil          # direction to face at the end (to talk to an NPC)
   @dir = nil           # direction handed to the game this frame
   @press_c = 0
+  @keys = []
+  @key_frame = -1
+  @key_age = 0
   @tap_seq = nil
   @stuck = 0
   @hooked = false
@@ -1940,7 +2107,18 @@ module AnyPlayTouch
   @sized = false
   @native_resize = nil
   class << self
-    attr_accessor :dir, :press_c
+    attr_accessor :dir, :press_c, :keys
+
+    # buttons queued by a menu tap, handed to the game one per frame
+    def next_key(b)
+      k = @keys.first
+      return false if k.nil? || k != b
+      fr = (Graphics.frame_count rescue 0)
+      return false if fr == @key_frame
+      @key_frame = fr
+      @keys.shift
+      true
+    end
     attr_writer :native_resize
 
     def tile_w
@@ -1994,6 +2172,7 @@ module AnyPlayTouch
             AnyPlayLog.write("  confirm sent")
             return true
           end
+          return true if AnyPlayTouch.next_key(b)
           __ap_trigger(b)
         end
         if Input.respond_to?(:repeat?)
@@ -2003,6 +2182,7 @@ module AnyPlayTouch
               AnyPlayTouch.press_c = 0
               return true
             end
+            return true if AnyPlayTouch.next_key(b)
             __ap_repeat(b)
           end
         end
@@ -2164,11 +2344,16 @@ module AnyPlayTouch
     end
 
     def on_tap(mx, my)
-      @route = []; @face = nil; @dir = nil; @expect = nil
+      @route = []; @face = nil; @dir = nil; @expect = nil; @keys = []
       AnyPlayLog.write("tap #{mx},#{my} scene=#{(defined?(SceneManager) ? SceneManager.scene : $scene).class} free=#{map_free?} player=#{($game_player.x rescue '?')},#{($game_player.y rescue '?')}")
       unless map_free?
         diag_not_free
-        @press_c = 4          # dialogs, menus, title: tap = confirm
+        r = AnyPlayMenu.tap(mx, my)     # menus: pick the tapped entry first
+        if r.is_a?(Array)
+          @keys = r; @key_age = 0
+        else
+          @press_c = 4        # dialogs, text, title: tap = confirm
+        end
         return
       end
       tx, ty = screen_to_tile(mx, my)
@@ -2235,6 +2420,10 @@ module AnyPlayTouch
       hook_input
       if @press_c > 0
         @press_c -= 1
+      end
+      unless @keys.empty?
+        @key_age += 1
+        @keys = [] if @key_age > 90
       end
       if Input.respond_to?(:anyplay_tap_seq)
         seq = Input.anyplay_tap_seq
@@ -3225,7 +3414,23 @@ module AnyPlayPerf
             c.is_a?(String) ? c.getbyte(0) : c
           end
         end
-        # Ruby 3.x Marshal.load(port) needs getbyte + read on the port object
+        # A tileset taller than the GPU's texture limit becomes a "mega surface"; the game's own Ruby
+      # tilemap cannot draw it (Operation not supported for mega surfaces). The engine's native
+      # tilemap can, so switch to it when that happens.
+      if defined?(TilemapLoader) && defined?(SynchronizedTilemap) && TilemapLoader.method_defined?(:tileset=) &&
+         !TilemapLoader.method_defined?(:__anyplay_set_tileset)
+        TilemapLoader.class_eval do
+          alias_method :__anyplay_set_tileset, :tileset=
+          def tileset=(v)
+            if v && (v.mega? rescue false) && !@tilemap.is_a?(SynchronizedTilemap)
+              AnyPlayLog.write("tileset #{v.width}x#{v.height} is too big for the GPU: using the native tilemap")
+              (setClass(SynchronizedTilemap) rescue AnyPlayLog.write("native tilemap switch failed"))
+            end
+            self.__anyplay_set_tileset(v)
+          end
+        end
+      end
+      # Ruby 3.x Marshal.load(port) needs getbyte + read on the port object
         unless StringInput.method_defined?(:getbyte)
           StringInput.class_eval { def getbyte; getc; end }
         end
