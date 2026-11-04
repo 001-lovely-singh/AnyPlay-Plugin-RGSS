@@ -1514,6 +1514,58 @@ module AnyPlayCompat
 end
 AnyPlayCompat.safe_dispose_patch
 
+# Windows mouse calls (GetCursorPos / ScreenToClient / GetClientRect / GetWindowRect) do nothing on
+# Android, so games that read the mouse position (Mouse.getMousePos) got nil and crashed.
+# Answer them from the engine's own mouse/touch position instead.
+module AnyPlayWin
+  FUNCS = %w(getcursorpos screentoclient getclientrect getwindowrect)
+  def self.mouse
+    [Input.mouse_x.to_i, Input.mouse_y.to_i]
+  rescue Exception
+    [0, 0]
+  end
+  def self.size
+    [Graphics.width.to_i, Graphics.height.to_i]
+  rescue Exception
+    [0, 0]
+  end
+  module Shim
+    def call(*a)
+      case @__ap_fn
+      when "getcursorpos"
+        x, y = AnyPlayWin.mouse
+        a[0].replace([x, y].pack("ll")) if a[0].is_a?(String) && !a[0].frozen?
+        1
+      when "screentoclient"
+        1
+      else   # getclientrect / getwindowrect: [left, top, right, bottom]
+        w, h = AnyPlayWin.size
+        a[1].replace([0, 0, w, h].pack("l4")) if a[1].is_a?(String) && !a[1].frozen?
+        1
+      end
+    rescue Exception
+      0
+    end
+  end
+end
+begin
+  if defined?(Win32API) && Win32API.is_a?(Class) && Input.respond_to?(:mouse_x)
+    class << Win32API
+      alias_method :__anyplay_new, :new
+      def new(lib, fn, *rest)
+        o = __anyplay_new(lib, fn, *rest)
+        name = fn.to_s.downcase.sub(/[aw]\z/, "")
+        if AnyPlayWin::FUNCS.include?(name) || AnyPlayWin::FUNCS.include?(fn.to_s.downcase)
+          o.instance_variable_set(:@__ap_fn, AnyPlayWin::FUNCS.include?(fn.to_s.downcase) ? fn.to_s.downcase : name)
+          o.extend(AnyPlayWin::Shim)
+        end
+        o
+      end
+    end
+  end
+rescue Exception
+end
+
 # Some Essentials games (MKXP Compatibility Fix script) call
 # Graphics.mkxp_snap_to_bitmap, the old name of snap_to_bitmap.
 begin
@@ -1709,10 +1761,10 @@ end
 # catches itself - those are marked), (3) the final error that stopped the game
 # with the full call chain, and (4) a few notes (touch / slow frames) for context.
 module AnyPlayLog
-  VERSION   = "0.1.36"
+  VERSION   = "0.1.37"
   FILE      = "AnyPlayLog.txt"
   MAX_BYTES = 250_000
-  CAPS      = { error: 200, note: 120 }
+  CAPS      = { error: 200, note: 400 }
   @bytes = 0
   @started = false
   @full = false
@@ -1855,6 +1907,13 @@ module AnyPlayLog
       raw("[#{stamp}] #{clean(msg, 1500)}")
     end
 
+    # menu / tap debugging lines (own cap, always creates the file)
+    def menu(msg)
+      return if (@cnt[:menu] += 1) > 90
+      start
+      raw("[#{stamp}] #{clean(msg, 700)}")
+    end
+
     def script_errors(errs, compat = "")
       return if errs.nil? || errs.empty?
       start
@@ -1889,7 +1948,12 @@ module AnyPlayLog
         err = "#{line}  (#{quiet { context }})"
         sn = snippet(first)
         err << "\n" + sn if sn
-        bt[1, 5].to_a.each { |l| err << "\n      from #{label(l)}" }
+        bt[1, 5].to_a.each_with_index do |l, i|
+          err << "\n      from #{label(l)}"
+          if i < 2 && (s2 = snippet(l))
+            err << "\n" + s2
+          end
+        end
         err << "\n      (the game may have handled this one itself)"
         error(err)
       elsif [10, 100, 1000, 10000].include?(c)
@@ -2098,11 +2162,25 @@ module AnyPlayMenu
       ti > ci ? (v ? Input::DOWN : Input::RIGHT) : (v ? Input::UP : Input::LEFT)
     end
 
+    def say(msg)
+      AnyPlayLog.menu(msg) if @dbg
+    end
+
+    def windows_dump
+      out = []
+      each_obj(%w(Window SpriteWindow)) do |w|
+        begin
+          next if w.disposed? || !w.visible
+          out << "#{w.class}@#{w.x.to_i},#{w.y.to_i} #{w.width.to_i}x#{w.height.to_i} act=#{(w.active rescue '?')} idx=#{(w.index rescue '-')} n=#{(item_count(w) rescue '-')}"
+        rescue Exception
+        end
+      end
+      out.first(8)
+    end
+
     def debug(mx, my, gx, gy, panels)
-      return if (@dbg = (@dbg || 0) + 1) > 3
-      AnyPlayLog.start   # menu taps are being checked right now: make sure this goes into the file
       list = panels.map { |p| "#{p[0].class}@#{p[1].to_i},#{p[2].to_i} #{p[3].to_i}x#{p[4].to_i}#{(p[0].selected rescue false) ? '*' : ''}" }
-      AnyPlayLog.write("  menu-debug: tap=#{mx},#{my} game=#{gx.to_i},#{gy.to_i} gfx=#{(Graphics.width rescue '?')}x#{(Graphics.height rescue '?')} resize=#{$ResizeFactor.inspect} off=#{$ResizeOffsetX.inspect},#{$ResizeOffsetY.inspect} panels=#{list.inspect}")
+      say("  menu-debug: tap=#{mx},#{my} game=#{gx.to_i},#{gy.to_i} gfx=#{(Graphics.width rescue '?')}x#{(Graphics.height rescue '?')} resize=#{$ResizeFactor.inspect} off=#{$ResizeOffsetX.inspect},#{$ResizeOffsetY.inspect} panels=#{list.inspect}")
     rescue Exception
     end
 
@@ -2110,10 +2188,12 @@ module AnyPlayMenu
     # Hash = walk the highlight to a panel first (see drive)
     def tap(mx, my)
       gx, gy = to_game(mx, my)
+      @dbg = ((@taps = (@taps || 0) + 1) <= 15)
+      say("  menu-tap #{mx},#{my} windows=#{windows_dump.inspect}") if @dbg
       w = window_at(gx, gy)
       if w
         i = pick_item(w, gx, gy)
-        AnyPlayLog.write("  menu: window #{w.class} index=#{(w.index rescue '?')} tapped_item=#{i.inspect}")
+        say("  menu: window #{w.class} index=#{(w.index rescue '?')} tapped_item=#{i.inspect}")
         return nil unless i
         w.index = i unless w.index == i
         return :confirm
@@ -2123,18 +2203,18 @@ module AnyPlayMenu
       return nil if panels.size < 2
       hits = panels.select { |p| gx >= p[1] && gx < p[1] + p[3] && gy >= p[2] && gy < p[2] + p[4] && opaque_at?(p, gx, gy) }
       if hits.empty?
-        AnyPlayLog.write("  menu: tap is not on a panel, ignored")
+        say("  menu: tap is not on a panel, ignored")
         return :ignore
       end
       hit = hits.max_by { |p| [(p[0].z rescue 0), panels.index(p)] }
       ci = panels.index { |p| (p[0].selected rescue false) }
       ti = panels.index(hit)
-      AnyPlayLog.write("  menu: panel #{ti} tapped, highlighted=#{ci.inspect}")
+      say("  menu: panel #{ti} tapped, highlighted=#{ci.inspect}")
       return nil unless ci
       return :confirm if ci == ti
       { target: hit[0], vertical: panel_vertical?(panels), steps: 0, stall: 0, last: nil }
     rescue Exception => e
-      AnyPlayLog.write("  menu failed: #{e.class} #{e.message[0, 80]}")
+      say("  menu failed: #{e.class} #{e.message[0, 80]}")
       nil
     end
   end
@@ -2340,7 +2420,7 @@ module AnyPlayTouch
     # call stack of the code that called Graphics.update). Only the first taps.
     def diag_not_free
       @diag = (@diag || 0) + 1
-      return if @diag > 12
+      return if @diag > 4
       why = []
       why << "scene_not_map" unless scene_is_map?
       why << "msgwin" if ($game_temp.message_window_showing rescue false)
