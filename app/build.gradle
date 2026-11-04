@@ -14,8 +14,8 @@ android {
         applicationId "com.anyplay.rgssplugin"
         minSdk 23
         targetSdk 33
-        versionCode 63
-        versionName "0.1.36"
+        versionCode 64
+        versionName "0.1.37"
         archivesBaseName = "mkxp-z-$versionName"
         ndk.debugSymbolLevel = 'FULL'
     }
