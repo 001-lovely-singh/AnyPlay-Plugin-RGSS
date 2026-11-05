@@ -1731,6 +1731,80 @@ module AnyPlayFastFiles
   rescue Exception
     nil
   end
+  # Everything else (Data/..., folders, ...): games sometimes ask the same question every frame.
+  # On slow storage each call is several milliseconds. Remember the answer very briefly and
+  # forget it as soon as the game creates / deletes / renames something.
+  @short = {}
+  @slowfs = {}
+  class << self
+    attr_reader :short
+    def forget; @short.clear; end
+    def timed(path, orig)
+      t0 = AnyPlayFastFiles.now
+      v = orig.call(path)
+      ms = (AnyPlayFastFiles.now - t0) * 1000.0
+      if ms > 0.4
+        @slowfs.clear if @slowfs.size > 300
+        e = (@slowfs[path] ||= [0, 0.0])
+        e[0] += 1
+        e[1] += ms
+      end
+      v
+    end
+    def slowfs_report
+      top = @slowfs.select { |_, e| e[1] > 30.0 }.sort_by { |_, e| -e[1] }.first(3)
+      @slowfs = {}
+      top.empty? ? "" : " slowfs=" + top.map { |p, e| "#{p[0, 70]}(x#{e[0]},#{e[1].to_i}ms)" }.join(",")
+    end
+    def short_answer(tag, path, pos_ttl, neg_ttl, orig)
+      return orig.call(path) unless path.is_a?(String) && path.bytesize < 400
+      key = tag + path
+      e = @short[key]
+      t = now
+      return e[1] if e && (t - e[0]) < (e[1] ? pos_ttl : neg_ttl)
+      v = timed(path, orig)
+      @short.clear if @short.size > 20_000
+      @short[key] = [t, v]
+      v
+    end
+  end
+  begin
+    singles = [[File, :exist?, 1.0, 0.3], [File, :file?, 1.0, 0.3], [FileTest, :exist?, 1.0, 0.3], [FileTest, :file?, 1.0, 0.3],
+               [File, :directory?, 2.0, 0.5], [FileTest, :directory?, 2.0, 0.5], [Dir, :exist?, 2.0, 0.5]]
+    [[File, :exists?], [FileTest, :exists?], [Dir, :exists?]].each do |m, n|
+      singles << [m, n, 1.0, 0.3] if m.respond_to?(n)
+    end
+    singles.each do |mod, meth, pos, neg|
+      orig = mod.method(meth)
+      tag = "#{mod.name}.#{meth}:"
+      mod.define_singleton_method(meth) do |path|
+        if path.is_a?(String) && path =~ AnyPlayFastFiles::RES && !%i(directory?).include?(meth) && meth != :exists? && !(mod == Dir)
+          orig.call(path)   # Graphics / Audio / Fonts: handled by the folder lists below
+        else
+          AnyPlayFastFiles.short_answer(tag, path, pos, neg, orig)
+        end
+      end
+    end
+    # anything that changes the disk makes the remembered answers stale
+    [[File, :delete], [File, :unlink], [File, :rename], [Dir, :mkdir], [Dir, :rmdir], [Dir, :delete], [Dir, :unlink],
+     [File, :write], [File, :binwrite], [IO, :write], [IO, :binwrite]].each do |mod, meth|
+      next unless mod.respond_to?(meth)
+      orig = mod.method(meth)
+      mod.define_singleton_method(meth) do |*a, **kw, &b|
+        AnyPlayFastFiles.forget
+        kw.empty? ? orig.call(*a, &b) : orig.call(*a, **kw, &b)
+      end
+    end
+    fopen = File.method(:open)
+    File.define_singleton_method(:open) do |*a, **kw, &b|
+      m = a[1]
+      m = kw[:mode] if m.nil?
+      AnyPlayFastFiles.forget if m.is_a?(Integer) || (m.is_a?(String) && m =~ /[wa+]/)
+      kw.empty? ? fopen.call(*a, &b) : fopen.call(*a, **kw, &b)
+    end
+  rescue Exception
+  end
+
   [[File, :exist?], [File, :file?], [FileTest, :exist?], [FileTest, :file?]].each do |mod, meth|
     orig = mod.method(meth)
     tag = "#{mod.name}.#{meth}:"
@@ -1761,7 +1835,7 @@ end
 # catches itself - those are marked), (3) the final error that stopped the game
 # with the full call chain, and (4) a few notes (touch / slow frames) for context.
 module AnyPlayLog
-  VERSION   = "0.1.37"
+  VERSION   = "0.1.39"
   FILE      = "AnyPlayLog.txt"
   MAX_BYTES = 250_000
   CAPS      = { error: 200, note: 400 }
@@ -2072,7 +2146,7 @@ module AnyPlayMenu
         begin
           next if w.disposed?
           next unless w.visible && w.active
-          next unless w.respond_to?(:index) && w.respond_to?(:index=)
+          next unless w.respond_to?(:index) && w.respond_to?(:index=) && item_count(w)
           vx, vy = vp_off(w)
           wx = w.x + vx
           wy = w.y + vy
@@ -2163,7 +2237,7 @@ module AnyPlayMenu
     end
 
     def say(msg)
-      AnyPlayLog.menu(msg) if @dbg
+      AnyPlayLog.write(msg) if @dbg
     end
 
     def windows_dump
@@ -2178,6 +2252,32 @@ module AnyPlayMenu
       out.first(8)
     end
 
+    # Is a list / command window on screen and ready for input (anywhere, not only under the finger)?
+    def selectable_active?
+      found = false
+      each_obj(%w(Window SpriteWindow)) do |w|
+        begin
+          next if found || w.disposed?
+          found = true if w.visible && w.active && w.respond_to?(:index) && w.respond_to?(:index=) && item_count(w)
+        rescue Exception
+        end
+      end
+      found
+    end
+
+    # Is a typing message box ("press a button to go on") showing?
+    def message_visible?
+      found = false
+      each_obj(%w(Window SpriteWindow)) do |w|
+        begin
+          next if found || w.disposed?
+          found = true if w.visible && w.class.name.to_s =~ /AdvancedText|MessageWindow|Window_Message/
+        rescue Exception
+        end
+      end
+      found
+    end
+
     def debug(mx, my, gx, gy, panels)
       list = panels.map { |p| "#{p[0].class}@#{p[1].to_i},#{p[2].to_i} #{p[3].to_i}x#{p[4].to_i}#{(p[0].selected rescue false) ? '*' : ''}" }
       say("  menu-debug: tap=#{mx},#{my} game=#{gx.to_i},#{gy.to_i} gfx=#{(Graphics.width rescue '?')}x#{(Graphics.height rescue '?')} resize=#{$ResizeFactor.inspect} off=#{$ResizeOffsetX.inspect},#{$ResizeOffsetY.inspect} panels=#{list.inspect}")
@@ -2188,17 +2288,32 @@ module AnyPlayMenu
     # Hash = walk the highlight to a panel first (see drive)
     def tap(mx, my)
       gx, gy = to_game(mx, my)
-      @dbg = ((@taps = (@taps || 0) + 1) <= 15)
+      panels = collect_panels
+      sig = windows_dump.map { |s| s.sub(/ act=.*/, "") }.join(";") + "|P#{panels.size}"
+      @sigs ||= {}
+      @dbg = !@sigs[sig] && @sigs.size < 30
+      @sigs[sig] = true
       say("  menu-tap #{mx},#{my} windows=#{windows_dump.inspect}") if @dbg
+      # 1) a list / command window under the finger: pick that entry
       w = window_at(gx, gy)
       if w
         i = pick_item(w, gx, gy)
         say("  menu: window #{w.class} index=#{(w.index rescue '?')} tapped_item=#{i.inspect}")
-        return nil unless i
+        return :ignore unless i
         w.index = i unless w.index == i
         return :confirm
       end
-      panels = collect_panels
+      # 2) a list is waiting for a choice but the tap is not on it: do nothing (no accidental Enter)
+      if selectable_active?
+        say("  menu: tap outside the active list, ignored")
+        return :ignore
+      end
+      # 3) a message box is showing: tap = go on
+      if message_visible?
+        say("  menu: message showing, confirm")
+        return nil
+      end
+      # 4) panels (load screen, party ...)
       debug(mx, my, gx, gy, panels)
       return nil if panels.size < 2
       hits = panels.select { |p| gx >= p[1] && gx < p[1] + p[3] && gy >= p[2] && gy < p[2] + p[4] && opaque_at?(p, gx, gy) }
@@ -2214,7 +2329,7 @@ module AnyPlayMenu
       return :confirm if ci == ti
       { target: hit[0], vertical: panel_vertical?(panels), steps: 0, stall: 0, last: nil }
     rescue Exception => e
-      say("  menu failed: #{e.class} #{e.message[0, 80]}")
+      AnyPlayLog.write("  menu failed: #{e.class} #{e.message[0, 80]}")
       nil
     end
   end
@@ -3495,7 +3610,12 @@ module AnyPlayPerf
     list = @samples.sort_by { |_, v| -v }
     total = list.inject(0) { |a, (_, v)| a + v }
     @samples = Hash.new(0)
-    "busiest(#{total} samples): " + list.first(6).map { |k, v| "#{v}x #{k}" }.join(" | ")
+    out = "busiest(#{total} samples): " + list.first(6).map { |k, v| "#{v}x #{k}" }.join(" | ")
+    list.first(2).each do |k, _|
+      sn = (AnyPlayLog.snippet(k) rescue nil)
+      out << "\n" + sn if sn
+    end
+    out
   end
   def self.note(script_ms, engine_ms, layer_ms, where)
     return if @n > 150
@@ -3532,7 +3652,7 @@ module AnyPlayPerf
     gct = (gc[:time] || 0) - @w_gcms
     @w_gc = gc[:count]; @w_gcms = gc[:time] || 0
     if fps < target * 0.9 || @w_o50 > 8
-      AnyPlayLog.slow("window: fps=#{fps.round(1)}/#{target.to_i} frames>50ms=#{@w_o50} frames>100ms=#{@w_o100} worst=#{@w_max.to_i}ms script_avg=#{(@w_script / @w_frames).round(1)}ms engine_avg=#{(@w_engine / @w_frames).round(1)}ms gc_runs=#{gcn} gc_ms=#{gct} #{AnyPlayFastFiles.take_stats} #{AnyPlayLog.context}", 5)
+      AnyPlayLog.slow("window: fps=#{fps.round(1)}/#{target.to_i} frames>50ms=#{@w_o50} frames>100ms=#{@w_o100} worst=#{@w_max.to_i}ms script_avg=#{(@w_script / @w_frames).round(1)}ms engine_avg=#{(@w_engine / @w_frames).round(1)}ms gc_runs=#{gcn} gc_ms=#{gct} #{AnyPlayFastFiles.take_stats}#{AnyPlayFastFiles.slowfs_report} #{AnyPlayLog.context}", 5)
       AnyPlayLog.slow(top_samples, 0)
     else
       @samples = Hash.new(0)
