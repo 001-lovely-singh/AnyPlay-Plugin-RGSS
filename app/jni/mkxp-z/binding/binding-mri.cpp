@@ -1835,7 +1835,7 @@ end
 # catches itself - those are marked), (3) the final error that stopped the game
 # with the full call chain, and (4) a few notes (touch / slow frames) for context.
 module AnyPlayLog
-  VERSION   = "0.1.39"
+  VERSION   = "0.1.40"
   FILE      = "AnyPlayLog.txt"
   MAX_BYTES = 250_000
   CAPS      = { error: 200, note: 400 }
@@ -2286,7 +2286,19 @@ module AnyPlayMenu
 
     # nil = nothing found (caller just confirms), :confirm = confirm now, :ignore = do nothing,
     # Hash = walk the highlight to a panel first (see drive)
+    # called right before the confirm key is handed to the game: make sure the tapped entry is still the highlighted one
+    def apply_pin
+      pin, @pin = @pin, nil
+      return "" unless pin
+      w, i = pin
+      w.index = i unless (w.index == i rescue true)
+      " index=#{(w.index rescue '?')}"
+    rescue Exception
+      ""
+    end
+
     def tap(mx, my)
+      @pin = nil
       gx, gy = to_game(mx, my)
       panels = collect_panels
       sig = windows_dump.map { |s| s.sub(/ act=.*/, "") }.join(";") + "|P#{panels.size}"
@@ -2301,6 +2313,7 @@ module AnyPlayMenu
         say("  menu: window #{w.class} index=#{(w.index rescue '?')} tapped_item=#{i.inspect}")
         return :ignore unless i
         w.index = i unless w.index == i
+        @pin = [w, i]
         return :confirm
       end
       # 2) a list is waiting for a choice but the tap is not on it: do nothing (no accidental Enter)
@@ -2413,7 +2426,7 @@ module AnyPlayTouch
         def trigger?(b)
           if AnyPlayTouch.press_c > 0 && (b == Input::C)
             AnyPlayTouch.press_c = 0
-            AnyPlayLog.write("  confirm sent")
+            AnyPlayLog.write("  confirm sent" + AnyPlayMenu.apply_pin.to_s)
             return true
           end
           return true if AnyPlayTouch.next_key(b)
@@ -3737,8 +3750,7 @@ class << Graphics
   def update(*a)
     AnyPlayPerf.run(lambda { __anyplay_update(*a) })
   end
-end
-)RB", &preState);
+end)RB", &preState);
             if (preState)
                 rb_set_errinfo(Qnil);
         }
