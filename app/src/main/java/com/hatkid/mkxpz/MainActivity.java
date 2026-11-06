@@ -141,9 +141,9 @@ public class MainActivity extends SDLActivity
 
     /**
      * Select a native VM before SDL loads any libraries. The launcher may pass
-     * runtime_mode=ruby18 or runtime_mode=ruby3 to override detection. Auto mode
-     * follows the game's Windows executable ProductVersion convention: version
-     * 1.x is treated as RGSS1/Ruby 1.8.7; all other or missing versions use Ruby 3.1.
+     * runtime_mode=ruby18 or runtime_mode=ruby3 to select a runtime explicitly.
+     * Auto mode uses Ruby 3.1: Windows ProductVersion is not reliable evidence
+     * of an RGSS generation, so it must not silently switch existing games.
      */
     private void selectRubyRuntime(Intent intent)
     {
@@ -159,12 +159,8 @@ public class MainActivity extends SDLActivity
             return;
         }
 
-        File exe = findGameExecutable(new File(GAME_PATH));
-        String productVersion = exe == null ? null : readProductVersion(exe);
-        sUseRuby18 = isRuby18ProductVersion(productVersion);
-        Log.i(TAG, "Ruby runtime auto-select: " + (sUseRuby18 ? "1.8.7" : "3.1")
-                + " (exe=" + (exe == null ? "none" : exe.getName())
-                + ", ProductVersion=" + (productVersion == null ? "missing" : productVersion) + ")");
+        sUseRuby18 = false;
+        Log.i(TAG, "Ruby runtime auto-select: 3.1 (safe default; no explicit runtime_mode)");
     }
 
     @Override
