@@ -1,6 +1,8 @@
 APP_ABI := arm64-v8a armeabi-v7a
 APP_PLATFORM := android-23
 
+# Match native optimization to the Android Gradle build type. Without this,
+# release APKs can inherit the debug native optimization setting.
 ifeq ($(NDK_DEBUG),1)
     APP_OPTIM := debug
 else
