@@ -1,9 +1,12 @@
 LOCAL_PATH := $(call my-dir)/mkxp-z
 LOCAL_BUILD_PATH := $(call my-dir)/build-$(TARGET_ARCH_ABI)
+MKXPZ_MODULE ?= mkxp-z
+MKXPZ_RUBY_MODULE ?= ruby
+MKXPZ_LEGACY_RUBY ?= 0
 
 include $(CLEAR_VARS)
 
-LOCAL_MODULE := mkxp-z
+LOCAL_MODULE := $(MKXPZ_MODULE)
 
 LOCAL_CPPFLAGS := \
 	-DGLES2_HEADER \
@@ -15,6 +18,10 @@ LOCAL_CPPFLAGS := \
 	-DMKXPZ_MINIFFI \
 	-Wno-undefined-var-template \
 	-Wno-uninitialized
+
+ifeq ($(MKXPZ_LEGACY_RUBY),1)
+LOCAL_CPPFLAGS += -DMKXPZ_LEGACY_RUBY
+endif
 
 LOCAL_C_INCLUDES := \
 	$(LOCAL_BUILD_PATH)/include \
@@ -109,7 +116,7 @@ LOCAL_SRC_FILES := \
 	$(LOCAL_PATH)/binding/miniffi-binding.cpp \
 	$(LOCAL_PATH)/binding/module_rpg.cpp
 
-LOCAL_SHARED_LIBRARIES := SDL2 SDL2_ttf SDL2_image SDL2_sound openal ruby
+LOCAL_SHARED_LIBRARIES := SDL2 SDL2_ttf SDL2_image SDL2_sound openal $(MKXPZ_RUBY_MODULE)
 
 LOCAL_STATIC_LIBRARIES := libogg libvorbis libtheora physfs pixman uchardet libiconv openssl
 
