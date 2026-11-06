@@ -117,12 +117,16 @@ CONFIGURE_ENV := \
 
 # Do not put Ruby 3.1's installed include directory in Ruby 1.8's configure
 # probes; each engine must compile against exactly one MRI header set.
+# Ruby 1.8.7's build scripts (extmk.rb, mkmf.rb) only run on a Ruby 1.8 interpreter, so build a native
+# x86_64 miniruby from the same sources first and use it as the build-time MINIRUBY.
+RUBY18_HOST_DIR := $(PWD)/ruby18-host
+RUBY18_HOST_RUBY := $(RUBY18_HOST_DIR)/miniruby
 RUBY18_CFLAGS := -O0 $(CROSSFLAGS) --sysroot=$(TOOLCHAIN)/sysroot -I$(TOOLCHAIN)/sysroot/usr/include
 RUBY18_CONFIGURE_ENV := \
 	CC="$(CC)" CXX="$(CXX)" AS="$(AS)" LD="$(LD)" AR="$(AR)" NM="$(NM)" \
 	RANLIB="$(RANLIB)" STRIP="$(STRIP)" OBJCOPY="$(OBJCOPY)" OBJDUMP="$(OBJDUMP)" \
 	CFLAGS="$(RUBY18_CFLAGS)" LDFLAGS="$(LDFLAGS)" CLANG_FLAGS="$(CLANG_FLAGS)" \
-	MINIRUBY="ruby --disable-gems -rrbconfig -rfileutils -r$(PWD)/ruby18/fake" \
+	MINIRUBY="$(RUBY18_HOST_RUBY) -I$(PWD)/ruby18 -I$(PWD)/ruby18/lib -r$(PWD)/ruby18/fake" \
 	PKG_CONFIG_LIBDIR="$(PKG_CONFIG_LIBDIR)"
 
 # Autoconf arguments
@@ -238,7 +242,13 @@ $(RUBY18_LIBDIR)/libruby.so: ruby18/Makefile
 		test -f rbconfig.rb && \
 		make install
 
-ruby18/Makefile: ruby18/configure preconfigured/ruby18.Setup
+$(RUBY18_HOST_RUBY): | ruby18/configure
+	rm -rf $(RUBY18_HOST_DIR) && mkdir -p $(RUBY18_HOST_DIR)
+	cd $(RUBY18_HOST_DIR) && CC=gcc CFLAGS="-O1 -w -fcommon -fno-strict-aliasing -fno-stack-protector -fno-pie -std=gnu89" \
+		LDFLAGS="-no-pie" $(PWD)/ruby18/configure --disable-install-doc --disable-shared
+	cd $(RUBY18_HOST_DIR) && make -j$(NPROC) miniruby
+
+ruby18/Makefile: ruby18/configure preconfigured/ruby18.Setup $(RUBY18_HOST_RUBY)
 	cp preconfigured/ruby18.Setup ruby18/ext/Setup
 	cd ruby18; $(RUBY18_CONFIGURE_ENV) ./configure \
 		--host=$(HOST) --prefix="$(RUBY18_PREFIX)" \
