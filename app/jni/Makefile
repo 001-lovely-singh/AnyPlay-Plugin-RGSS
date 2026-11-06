@@ -242,6 +242,8 @@ ruby18/Makefile: ruby18/configure preconfigured/ruby18.Setup
 	cd ruby18; $(RUBY18_CONFIGURE_ENV) ./configure \
 		--host=$(HOST) --prefix="$(RUBY18_PREFIX)" \
 		--enable-shared --with-static-linked-ext --disable-install-doc
+	cd ruby18 && make fake.rb && \
+		printf '%s\n' 'TRUE = true unless defined?(TRUE)' 'FALSE = false unless defined?(FALSE)' >> fake.rb
 
 ruby18/configure: ruby18/configure.in
 	cd ruby18; autoconf
