@@ -122,7 +122,7 @@ RUBY18_CONFIGURE_ENV := \
 	CC="$(CC)" CXX="$(CXX)" AS="$(AS)" LD="$(LD)" AR="$(AR)" NM="$(NM)" \
 	RANLIB="$(RANLIB)" STRIP="$(STRIP)" OBJCOPY="$(OBJCOPY)" OBJDUMP="$(OBJDUMP)" \
 	CFLAGS="$(RUBY18_CFLAGS)" LDFLAGS="$(LDFLAGS)" CLANG_FLAGS="$(CLANG_FLAGS)" \
-	MINIRUBY="ruby --disable-gems -rrbconfig -r$(PWD)/ruby18/fake" \
+	MINIRUBY="ruby --disable-gems -rrbconfig -rfileutils -r$(PWD)/ruby18/fake" \
 	PKG_CONFIG_LIBDIR="$(PKG_CONFIG_LIBDIR)"
 
 # Autoconf arguments
