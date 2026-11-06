@@ -122,7 +122,7 @@ RUBY18_CONFIGURE_ENV := \
 	CC="$(CC)" CXX="$(CXX)" AS="$(AS)" LD="$(LD)" AR="$(AR)" NM="$(NM)" \
 	RANLIB="$(RANLIB)" STRIP="$(STRIP)" OBJCOPY="$(OBJCOPY)" OBJDUMP="$(OBJDUMP)" \
 	CFLAGS="$(RUBY18_CFLAGS)" LDFLAGS="$(LDFLAGS)" CLANG_FLAGS="$(CLANG_FLAGS)" \
-	MINIRUBY="ruby --disable-gems -I$(PWD)/ruby18 -r$(PWD)/ruby18/fake" \
+	MINIRUBY="ruby --disable-gems -r$(PWD)/ruby18/fake" \
 	PKG_CONFIG_LIBDIR="$(PKG_CONFIG_LIBDIR)"
 
 # Autoconf arguments
@@ -238,8 +238,9 @@ $(RUBY18_LIBDIR)/libruby.so: ruby18/Makefile
 		test -f rbconfig.rb && \
 		make install
 
-ruby18/Makefile: ruby18/configure preconfigured/ruby18.Setup
+ruby18/Makefile: ruby18/configure preconfigured/ruby18.Setup preconfigured/patch_ruby18_mkconfig.py
 	cp preconfigured/ruby18.Setup ruby18/ext/Setup
+	cd ruby18 && python3 ../preconfigured/patch_ruby18_mkconfig.py mkconfig.rb
 	cd ruby18; $(RUBY18_CONFIGURE_ENV) ./configure \
 		--host=$(HOST) --prefix="$(RUBY18_PREFIX)" \
 		--enable-shared --with-static-linked-ext --disable-install-doc
