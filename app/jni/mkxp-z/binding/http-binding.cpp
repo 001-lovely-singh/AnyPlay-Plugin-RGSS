@@ -146,7 +146,7 @@ RB_METHOD(httpPost) {
 #if RAPI_MAJOR >= 2
     return (VALUE)rb_thread_call_without_gvl(httpPostInternal, &args, 0, 0);
 #else
-    return httpPostInternal(&args);
+    return (VALUE)httpPostInternal(&args);
 #endif
 }
 
@@ -191,7 +191,7 @@ RB_METHOD(httpPostBody) {
 #if RAPI_MAJOR >= 2
     return (VALUE)rb_thread_call_without_gvl(httpPostBodyInternal, &args, 0, 0);
 #else
-    return httpPostBodyInternal(&args);
+    return (VALUE)httpPostBodyInternal(&args);
 #endif
 }
 
