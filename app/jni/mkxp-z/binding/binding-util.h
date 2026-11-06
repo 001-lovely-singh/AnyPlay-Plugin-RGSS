@@ -172,6 +172,16 @@ return Data_Wrap_Struct(klass, 0, free, 0);                                \
 
 #endif
 
+#if RAPI_FULL <= 187
+/* Ruby 1.8.7 has no rb_get_argv / rb_set_errinfo; use its older equivalents. */
+#ifndef rb_get_argv
+#define rb_get_argv() rb_gv_get("$*")
+#endif
+#ifndef rb_set_errinfo
+#define rb_set_errinfo(v) (ruby_errinfo = (v))
+#endif
+#endif
+
 #if RAPI_FULL < 220
 #define rb_utf8_str_new_cstr rb_str_new2
 #define rb_utf8_str_new rb_str_new
