@@ -233,9 +233,9 @@ ruby/configure: ruby/configure.ac
 	cd ruby; autoreconf -i
 
 # -------------------- Ruby 1.8.7 --------------------
-ruby18: init $(RUBY18_LIBDIR)/libruby.so
+ruby18: init $(RUBY18_LIBDIR)/libruby18.so
 
-$(RUBY18_LIBDIR)/libruby.so: ruby18/Makefile
+$(RUBY18_LIBDIR)/libruby18.so: ruby18/Makefile
 	cd ruby18 && make -j$(NPROC) && \
 		rm -f .rbconfig.time rbconfig.rb && \
 		make ./.rbconfig.time && \
@@ -244,6 +244,11 @@ $(RUBY18_LIBDIR)/libruby.so: ruby18/Makefile
 	mkdir -p $(RUBY18_BUILD_PREFIX)/include
 	cp ruby18/*.h $(RUBY18_BUILD_PREFIX)/include/
 	test -f $(RUBY18_BUILD_PREFIX)/include/config.h
+	# Ruby 3.1 and Ruby 1.8 both ship a file called libruby.so, and the 1.8 one has
+	# soname libruby.so.1.8. Give the 1.8 copy its own name so ndk-build does not mix
+	# the two and Android can load it as libruby18.so.
+	cp -L $(RUBY18_LIBDIR)/libruby.so $(RUBY18_LIBDIR)/libruby18.so
+	patchelf --set-soname libruby18.so $(RUBY18_LIBDIR)/libruby18.so
 
 $(RUBY18_HOST_RUBY): | ruby18/configure
 	rm -rf $(RUBY18_HOST_DIR) && mkdir -p $(RUBY18_HOST_DIR)
