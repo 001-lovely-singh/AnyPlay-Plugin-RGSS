@@ -89,7 +89,7 @@ else ifeq ($(ABI), arm64-v8a)
 endif
 
 # Compiler/linker flags
-CFLAGS      := -O0 $(CROSSFLAGS) --sysroot=$(TOOLCHAIN)/sysroot -I$(TOOLCHAIN)/sysroot/usr/include -I$(INCDIR)
+CFLAGS      := -O2 $(CROSSFLAGS) --sysroot=$(TOOLCHAIN)/sysroot -I$(TOOLCHAIN)/sysroot/usr/include -I$(INCDIR)
 LDFLAGS     := -L$(LIBDIR) -lm -lz
 CLANG_FLAGS := -target $(TARGET) --gcc-toolchain $(TOOLCHAIN)
 
@@ -121,7 +121,7 @@ CONFIGURE_ENV := \
 # x86_64 miniruby from the same sources first and use it as the build-time MINIRUBY.
 RUBY18_HOST_DIR := $(PWD)/ruby18-host
 RUBY18_HOST_RUBY := $(RUBY18_HOST_DIR)/miniruby
-RUBY18_CFLAGS := -O0 $(CROSSFLAGS) --sysroot=$(TOOLCHAIN)/sysroot -I$(TOOLCHAIN)/sysroot/usr/include
+RUBY18_CFLAGS := -O2 $(CROSSFLAGS) --sysroot=$(TOOLCHAIN)/sysroot -I$(TOOLCHAIN)/sysroot/usr/include
 RUBY18_CONFIGURE_ENV := \
 	CC="$(CC)" CXX="$(CXX)" AS="$(AS)" LD="$(LD)" AR="$(AR)" NM="$(NM)" \
 	RANLIB="$(RANLIB)" STRIP="$(STRIP)" OBJCOPY="$(OBJCOPY)" OBJDUMP="$(OBJDUMP)" \
@@ -241,6 +241,9 @@ $(RUBY18_LIBDIR)/libruby.so: ruby18/Makefile
 		make ./.rbconfig.time && \
 		test -f rbconfig.rb && \
 		make install
+	mkdir -p $(RUBY18_BUILD_PREFIX)/include
+	cp ruby18/*.h $(RUBY18_BUILD_PREFIX)/include/
+	test -f $(RUBY18_BUILD_PREFIX)/include/config.h
 
 $(RUBY18_HOST_RUBY): | ruby18/configure
 	rm -rf $(RUBY18_HOST_DIR) && mkdir -p $(RUBY18_HOST_DIR)
