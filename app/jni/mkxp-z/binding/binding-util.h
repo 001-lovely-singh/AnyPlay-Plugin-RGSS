@@ -177,6 +177,9 @@ return Data_Wrap_Struct(klass, 0, free, 0);                                \
 #ifndef rb_get_argv
 #define rb_get_argv() rb_gv_get("$*")
 #endif
+#ifndef rb_str_new_cstr
+#define rb_str_new_cstr(s) rb_str_new2(s)
+#endif
 #ifndef rb_set_errinfo
 #define rb_set_errinfo(v) (ruby_errinfo = (v))
 #endif
