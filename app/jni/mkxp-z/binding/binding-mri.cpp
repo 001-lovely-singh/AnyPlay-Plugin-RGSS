@@ -976,11 +976,13 @@ static void runRMXPScripts(BacktraceData &btData) {
         return;
     
 #ifdef __ANDROID__
-    // AnyPlay: old RPG Maker games were written for Ruby 1.8. Before running anything,
-    // every script is repaired for known Ruby 1.8-only syntax and checked with Ruby's
-    // parser. Whatever still can't be parsed is written, ALL at once, to
-    // AnyPlay_script_errors.txt in the game folder (so one test run shows every problem).
+    // AnyPlay's compatibility rewrite is specifically for running Ruby 1.8-era
+    // scripts on a newer MRI. When this engine is compiled against native Ruby
+    // 1.8, preserve the game's original script text and let Ruby 1.8 parse it.
     VALUE fixedScripts = Qnil;
+#if RAPI_FULL > 187
+    // Ruby 1.8-era games running on modern MRI: repair known syntax/API changes,
+    // then report scripts that still fail the modern Ruby parser.
     {
         static VALUE compatFix = Qnil;
         if (compatFix == Qnil) {
@@ -1210,6 +1212,10 @@ rescue Exception
 end
 )RB");
     }
+#else
+    // Native Ruby 1.8 already has the old syntax and byte/string semantics.
+    // Leave fixedScripts as Qnil so the normal execution loop uses scriptDecoded.
+#endif
 #endif
 
     while (true) {
@@ -1487,6 +1493,7 @@ Bignum = Integer unless defined?(Bignum)
         // AnyPlay: safe dispose, full-screen fit, tap-to-walk (see anyplay_prelude.rb)
         {
             int preState = 0;
+#if RAPI_FULL > 187
             rb_eval_string_protect(R"RB(# AnyPlay RGSS plugin: runs before the game's own scripts (Android only).
 # 1) Plane/Sprite/... #dispose no longer crashes for subclasses that skip `super` in initialize
 # 2) game screen is resized to the game's own size (fills the screen)
@@ -3751,6 +3758,37 @@ class << Graphics
     AnyPlayPerf.run(lambda { __anyplay_update(*a) })
   end
 end)RB", &preState);
+#else
+            // Keep the Ruby 1.8 bootstrap syntax compatible with the native VM.
+            // Ruby 1.8 already has the old string/index/Enumerator behavior, so
+            // do not install the Ruby 3 compatibility rewrites or instrumentation.
+            rb_eval_string_protect(R"RB(
+module AnyPlayCompat
+  def self.safe_dispose_patch
+    [:Plane, :Sprite, :Viewport, :Window, :Tilemap].each do |name|
+      begin
+        klass = Object.const_get(name)
+        next unless klass.method_defined?(:dispose)
+        next if klass.method_defined?(:__anyplay_dispose)
+        klass.class_eval do
+          alias_method :__anyplay_dispose, :dispose
+          def dispose
+            begin
+              __anyplay_dispose
+            rescue Exception => e
+              raise unless e.message.to_s.include?("No instance data")
+              nil
+            end
+          end
+        end
+      rescue Exception
+      end
+    end
+  end
+end
+AnyPlayCompat.safe_dispose_patch
+)RB", &preState);
+#endif
             if (preState)
                 rb_set_errinfo(Qnil);
         }
