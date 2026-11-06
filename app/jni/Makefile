@@ -231,7 +231,8 @@ ruby/configure: ruby/configure.ac
 ruby18: init $(RUBY18_LIBDIR)/libruby.so
 
 $(RUBY18_LIBDIR)/libruby.so: ruby18/Makefile
-	cd ruby18 && make -j$(NPROC) && \
+	cd ruby18 && export RUBYOPT=--disable-gems && \
+		make -j$(NPROC) && \
 		rm -f .rbconfig.time rbconfig.rb && \
 		make ./.rbconfig.time && \
 		test -f rbconfig.rb && \
