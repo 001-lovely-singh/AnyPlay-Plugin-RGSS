@@ -46,6 +46,18 @@ else
 	RUBY_PREFIX := $(BUILD_PREFIX)
 endif
 
+# Ruby 1.8 is built into a separate prefix so its headers and shared library
+# cannot overwrite the existing Ruby 3.1 build.
+RUBY18_BUILD_PREFIX := ${PWD}/build-ruby18-$(ABI)
+RUBY18_LIBDIR := $(RUBY18_BUILD_PREFIX)/lib
+ifneq (, ${MSYSTEM})
+	RUBY18_PREFIX := $(shell cygpath -m ${RUBY18_BUILD_PREFIX})
+else ifneq (, $(findstring /cygdrive/,$(PATH)))
+	RUBY18_PREFIX := $(shell cygpath -m ${RUBY18_BUILD_PREFIX})
+else
+	RUBY18_PREFIX := $(RUBY18_BUILD_PREFIX)
+endif
+
 # Toolchain tools
 CC      := $(TOOLCHAIN)/bin/$(PREFIX)-clang
 CXX     := $(TOOLCHAIN)/bin/$(PREFIX)-clang++
@@ -103,6 +115,15 @@ CONFIGURE_ENV := \
 	CFLAGS="$(CFLAGS)" LDFLAGS="$(LDFLAGS)" CLANG_FLAGS="$(CLANG_FLAGS)" \
 	PKG_CONFIG_LIBDIR="$(PKG_CONFIG_LIBDIR)"
 
+# Do not put Ruby 3.1's installed include directory in Ruby 1.8's configure
+# probes; each engine must compile against exactly one MRI header set.
+RUBY18_CFLAGS := -O0 $(CROSSFLAGS) --sysroot=$(TOOLCHAIN)/sysroot -I$(TOOLCHAIN)/sysroot/usr/include
+RUBY18_CONFIGURE_ENV := \
+	CC="$(CC)" CXX="$(CXX)" AS="$(AS)" LD="$(LD)" AR="$(AR)" NM="$(NM)" \
+	RANLIB="$(RANLIB)" STRIP="$(STRIP)" OBJCOPY="$(OBJCOPY)" OBJDUMP="$(OBJDUMP)" \
+	CFLAGS="$(RUBY18_CFLAGS)" LDFLAGS="$(LDFLAGS)" CLANG_FLAGS="$(CLANG_FLAGS)" \
+	PKG_CONFIG_LIBDIR="$(PKG_CONFIG_LIBDIR)"
+
 # Autoconf arguments
 CONFIGURE_ARGS := --host=$(HOST) --prefix="$(BUILD_PREFIX)"
 
@@ -134,7 +155,7 @@ CONFIGURE := $(CONFIGURE_ENV) ./configure $(CONFIGURE_ARGS)
 CMAKE     := $(CONFIGURE_ENV) cmake .. $(CMAKE_ARGS)
 
 
-.PHONY: all init clean cpufeatures pixman iconv openal openssl ruby clean-pixman clean-iconv clean-openal clean-openssl clean-ruby
+.PHONY: all init clean cpufeatures pixman iconv openal openssl ruby ruby18 clean-pixman clean-iconv clean-openal clean-openssl clean-ruby clean-ruby18
 
 default: all
 
@@ -206,6 +227,21 @@ ruby/Makefile: ruby/configure
 ruby/configure: ruby/configure.ac
 	cd ruby; autoreconf -i
 
+# -------------------- Ruby 1.8.7 --------------------
+ruby18: init $(RUBY18_LIBDIR)/libruby.so
+
+$(RUBY18_LIBDIR)/libruby.so: ruby18/Makefile
+	cd ruby18; make -j$(NPROC); make install
+
+ruby18/Makefile: ruby18/configure preconfigured/ruby18.Setup
+	cp preconfigured/ruby18.Setup ruby18/ext/Setup
+	cd ruby18; $(RUBY18_CONFIGURE_ENV) ./configure \
+		--host=$(HOST) --prefix="$(RUBY18_PREFIX)" \
+		--enable-shared --with-static-linked-ext --disable-install-doc
+
+ruby18/configure: ruby18/configure.in
+	cd ruby18; autoconf
+
 
 init:
 	@mkdir -p $(LIBDIR) $(INCDIR)
@@ -225,6 +261,9 @@ clean-openssl:
 clean-ruby:
 	-cd ruby; make clean; rm Makefile; rm configure
 
-clean: clean-pixman clean-iconv clean-openal clean-openssl clean-ruby
+clean-ruby18:
+	-cd ruby18; make clean; rm -f Makefile configure
 
-all: pixman iconv openal openssl ruby
+clean: clean-pixman clean-iconv clean-openal clean-openssl clean-ruby clean-ruby18
+
+all: pixman iconv openal openssl ruby ruby18
