@@ -20,7 +20,10 @@ import android.provider.Settings;
 import android.util.Log;
 import android.widget.Toast;
 import java.util.Locale;
+import java.util.Arrays;
+import java.util.Comparator;
 import java.io.File;
+import java.io.RandomAccessFile;
 
 import org.libsdl.app.SDLActivity;
 import android.view.View;
@@ -45,7 +48,9 @@ public class MainActivity extends SDLActivity
     // that folder INSTEAD of the fixed /storage/emulated/0/mkxp-z one. Opening
     // the app normally (launcher icon) still uses the default folder.
     private static final String EXTRA_GAME_DIR = "game_dir";
+    private static final String EXTRA_RUNTIME_MODE = "runtime_mode";
     private boolean mCustomGameDir = false;
+    private static boolean sUseRuby18 = false;
 
     protected boolean mStarted = false;
 
@@ -135,6 +140,110 @@ public class MainActivity extends SDLActivity
     }
 
     /**
+     * Select a native VM before SDL loads any libraries. The launcher may pass
+     * runtime_mode=ruby18 or runtime_mode=ruby3 to override detection. Auto mode
+     * follows the game's Windows executable ProductVersion convention: version
+     * 1.x is treated as RGSS1/Ruby 1.8.7; all other or missing versions use Ruby 3.1.
+     */
+    private void selectRubyRuntime(Intent intent)
+    {
+        String requested = intent == null ? null : intent.getStringExtra(EXTRA_RUNTIME_MODE);
+        if ("ruby18".equalsIgnoreCase(requested)) {
+            sUseRuby18 = true;
+            Log.i(TAG, "Ruby runtime override: 1.8.7");
+            return;
+        }
+        if ("ruby3".equalsIgnoreCase(requested)) {
+            sUseRuby18 = false;
+            Log.i(TAG, "Ruby runtime override: 3.1");
+            return;
+        }
+
+        File exe = findGameExecutable(new File(GAME_PATH));
+        String productVersion = exe == null ? null : readProductVersion(exe);
+        sUseRuby18 = isRuby18ProductVersion(productVersion);
+        Log.i(TAG, "Ruby runtime auto-select: " + (sUseRuby18 ? "1.8.7" : "3.1")
+                + " (exe=" + (exe == null ? "none" : exe.getName())
+                + ", ProductVersion=" + (productVersion == null ? "missing" : productVersion) + ")");
+    }
+
+    @Override
+    protected String[] getLibraries()
+    {
+        if (sUseRuby18) {
+            return new String[] {
+                "SDL2", "SDL2_image", "SDL2_ttf", "SDL2_sound", "openal",
+                "ruby18", "mkxp-z-ruby18"
+            };
+        }
+        return new String[] {
+            "SDL2", "SDL2_image", "SDL2_ttf", "SDL2_sound", "openal",
+            "ruby", "mkxp-z"
+        };
+    }
+
+    private static boolean isRuby18ProductVersion(String version)
+    {
+        if (version == null) return false;
+        String v = version.trim().replaceAll("\\s+", "");
+        return v.equals("1") || v.startsWith("1.") || v.startsWith("1,");
+    }
+
+    private static File findGameExecutable(File gameDir)
+    {
+        File preferred = new File(gameDir, "Game.exe");
+        if (preferred.isFile()) return preferred;
+        File[] files = gameDir.listFiles();
+        if (files == null) return null;
+        Arrays.sort(files, new Comparator<File>() {
+            @Override public int compare(File a, File b) {
+                return a.getName().compareToIgnoreCase(b.getName());
+            }
+        });
+        for (File file : files) {
+            if (file.isFile() && file.getName().toLowerCase(Locale.ROOT).endsWith(".exe")) return file;
+        }
+        return null;
+    }
+
+    /** Read the UTF-16LE ProductVersion string from a Windows version resource. */
+    private static String readProductVersion(File exe)
+    {
+        final byte[] key = new byte[] {
+            'P', 0, 'r', 0, 'o', 0, 'd', 0, 'u', 0, 'c', 0, 't', 0,
+            'V', 0, 'e', 0, 'r', 0, 's', 0, 'i', 0, 'o', 0, 'n', 0
+        };
+        try (RandomAccessFile input = new RandomAccessFile(exe, "r")) {
+            long length = input.length();
+            if (length <= 0 || length > 64L * 1024L * 1024L) return null;
+            byte[] data = new byte[(int) length];
+            input.readFully(data);
+            for (int i = 0; i <= data.length - key.length; i++) {
+                boolean found = true;
+                for (int j = 0; j < key.length; j++) {
+                    if (data[i + j] != key[j]) { found = false; break; }
+                }
+                if (!found) continue;
+                int p = i + key.length;
+                while (p + 1 < data.length && data[p] == 0 && data[p + 1] == 0) p += 2;
+                StringBuilder value = new StringBuilder();
+                while (p + 1 < data.length && data[p + 1] == 0) {
+                    int ch = data[p] & 0xff;
+                    if (ch == 0) break;
+                    if (ch < 0x20 || ch > 0x7e) break;
+                    value.append((char) ch);
+                    p += 2;
+                }
+                String candidate = value.toString().trim();
+                if (!candidate.isEmpty()) return candidate;
+            }
+        } catch (Exception e) {
+            Log.w(TAG, "Could not read ProductVersion from " + exe.getName(), e);
+        }
+        return null;
+    }
+
+    /**
      * The activity is singleTask. If it is still alive (user pressed Home) and
      * AnyPlay asks for a DIFFERENT game, Ruby cannot be re-initialised in the same
      * process, so we close and the next launch starts a fresh process.
@@ -156,6 +265,7 @@ public class MainActivity extends SDLActivity
     {
         // Must be before super.onCreate(): picks the game folder before SDL starts.
         applyGameDirFromIntent(getIntent());
+        selectRubyRuntime(getIntent());
 
         super.onCreate(savedInstanceState);
 
