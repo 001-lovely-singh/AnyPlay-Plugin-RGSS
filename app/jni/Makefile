@@ -122,6 +122,7 @@ RUBY18_CONFIGURE_ENV := \
 	CC="$(CC)" CXX="$(CXX)" AS="$(AS)" LD="$(LD)" AR="$(AR)" NM="$(NM)" \
 	RANLIB="$(RANLIB)" STRIP="$(STRIP)" OBJCOPY="$(OBJCOPY)" OBJDUMP="$(OBJDUMP)" \
 	CFLAGS="$(RUBY18_CFLAGS)" LDFLAGS="$(LDFLAGS)" CLANG_FLAGS="$(CLANG_FLAGS)" \
+	MINIRUBY="ruby --disable-gems -I$(PWD)/ruby18 -r$(PWD)/ruby18/fake" \
 	PKG_CONFIG_LIBDIR="$(PKG_CONFIG_LIBDIR)"
 
 # Autoconf arguments
@@ -231,8 +232,7 @@ ruby/configure: ruby/configure.ac
 ruby18: init $(RUBY18_LIBDIR)/libruby.so
 
 $(RUBY18_LIBDIR)/libruby.so: ruby18/Makefile
-	cd ruby18 && export RUBYOPT=--disable-gems && \
-		make -j$(NPROC) && \
+	cd ruby18 && make -j$(NPROC) && \
 		rm -f .rbconfig.time rbconfig.rb && \
 		make ./.rbconfig.time && \
 		test -f rbconfig.rb && \
