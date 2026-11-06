@@ -95,4 +95,10 @@ if [[ ! -d "ruby" ]]; then
   git clone $GIT_ARGS -b mkxp-z-3.1 https://github.com/mkxp-z/ruby ruby
 fi
 
+# Ruby 1.8.7 (mkxp-z compatibility fork; kept separate from Ruby 3.1)
+if [[ ! -d "ruby18" ]]; then
+  echo "Downloading Ruby 1.8.7..."
+  git clone $GIT_ARGS -b ruby_1_8_7 https://github.com/mkxp-z/ruby ruby18
+fi
+
 echo "Done!"
