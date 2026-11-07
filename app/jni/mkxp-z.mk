@@ -1,7 +1,11 @@
+# Version script that limits the engine's exported symbols to SDL_main.
+MKXPZ_EXPORT_MAP := $(call my-dir)/engine-exports.map
+
 LOCAL_PATH := $(call my-dir)/mkxp-z
 LOCAL_BUILD_PATH := $(call my-dir)/build-$(TARGET_ARCH_ABI)
-MKXPZ_MODULE ?= mkxp-z
-MKXPZ_RUBY_MODULE ?= ruby
+MKXPZ_MODULE ?= mkxp-z-r3
+MKXPZ_RUBY_MODULE ?= ruby_r3
+MKXPZ_RUNTIME_ID ?= r3
 MKXPZ_LEGACY_RUBY ?= 0
 
 include $(CLEAR_VARS)
@@ -16,6 +20,7 @@ LOCAL_CPPFLAGS := \
 	-DMKXPZ_ALCDEVICE="ALCdevice" \
 	-DMKXPZ_SSL \
 	-DMKXPZ_MINIFFI \
+	-DMKXPZ_RUNTIME_ID="\"$(MKXPZ_RUNTIME_ID)\"" \
 	-Wno-undefined-var-template \
 	-Wno-uninitialized
 
@@ -121,5 +126,9 @@ LOCAL_SHARED_LIBRARIES := SDL2 SDL2_ttf SDL2_image SDL2_sound openal $(MKXPZ_RUB
 LOCAL_STATIC_LIBRARIES := libogg libvorbis libtheora physfs pixman uchardet libiconv openssl
 
 LOCAL_LDLIBS := -lz -llog -ldl -lm -lOpenSLES
+
+# Export only SDL_main (see engine-exports.map). --exclude-libs,ALL also keeps the
+# symbols of the statically linked libraries (openssl, physfs, ...) private.
+LOCAL_LDFLAGS += -Wl,--version-script=$(MKXPZ_EXPORT_MAP) -Wl,--exclude-libs,ALL
 
 include $(BUILD_SHARED_LIBRARY)
