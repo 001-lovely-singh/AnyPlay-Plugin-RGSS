@@ -98,6 +98,9 @@ jobs:
           make -j$(nproc)
           # Asegurar mapeo de carpetas por si acaso
           if [ -d "build-arm64-v8a" ] && [ ! -d "build-arm64" ]; then ln -s build-arm64-v8a build-arm64; fi
+          # Both Ruby 3.1 builds (r3 and r18) must exist, each in its own prefix.
+          test -f build-arm64-v8a/lib/libruby.so
+          test -f build-r18-arm64-v8a/lib/libruby.so
 
       # ── 8b. Compile native deps (armeabi-v7a, 32-bit phones) ─────────────────
       # AnyPlay: added so the APK also runs on 32-bit ARM phones.
@@ -117,6 +120,9 @@ jobs:
           ls -la build-armeabi-v7a/lib | head -30
           test -f build-armeabi-v7a/lib/libopenal.so
           test -d build-arm64-v8a/lib
+          test -f build-armeabi-v7a/lib/libruby.so
+          test -f build-r18-armeabi-v7a/lib/libruby.so
+          test -f build-r18-arm64-v8a/lib/libruby.so
 
       # ── 9. Make Gradle wrapper executable ────────────────────────────────────
       - name: Grant execute permission for gradlew
@@ -164,6 +170,17 @@ jobs:
           if [ -z "$APK" ]; then APK=$(find app/build/outputs/apk/release -name "*.apk" | head -1); fi
           cp "$APK" AnyPlay-RGSS-Plugin.apk
           echo "APK_PATH=AnyPlay-RGSS-Plugin.apk" >> "$GITHUB_ENV"
+
+      # ── 12c. Check the native runtimes inside the final APK ──────────────────
+      # r3 and r18 must each have their own libruby (SONAME libruby.so), each engine
+      # must NEED libruby.so and export only SDL_main. Fails the build otherwise.
+      - name: Verify runtime libraries in the APK
+        # First Phase A build: report problems but do not block the release.
+        # Remove this line once the check has been green on a real build.
+        continue-on-error: true
+        run: |
+          chmod +x app/jni/verify-runtimes.sh
+          app/jni/verify-runtimes.sh "$APK_PATH"
 
       # ── 13. Upload APK as artifact (always) ───────────────────────────────────
       - name: Upload APK artifact
