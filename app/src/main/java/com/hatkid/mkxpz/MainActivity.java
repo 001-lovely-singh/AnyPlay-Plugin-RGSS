@@ -25,6 +25,7 @@ import java.util.Comparator;
 import java.io.File;
 import java.io.RandomAccessFile;
 
+import org.libsdl.app.SDL;
 import org.libsdl.app.SDLActivity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -50,7 +51,17 @@ public class MainActivity extends SDLActivity
     private static final String EXTRA_GAME_DIR = "game_dir";
     private static final String EXTRA_RUNTIME_MODE = "runtime_mode";
     private boolean mCustomGameDir = false;
-    private static boolean sUseRuby18 = false;
+
+    // Runtime ids. A runtime = one libruby + one engine library, loaded together.
+    // One process = one runtime: Ruby cannot be initialised twice in a process,
+    // so a different runtime always needs a fresh process (see onNewIntent).
+    //   r3   : Ruby 3.1, no compatibility patches      (default)
+    //   r18  : Ruby 3.1 source, separate build         (Ruby 1.8 patches come in Phase B)
+    //   r187 : real Ruby 1.8.7                          (temporary, removed in Phase B)
+    private static final String RT_R3 = "r3";
+    private static final String RT_R18 = "r18";
+    private static final String RT_R187 = "r187";
+    private static String sRuntimeId = RT_R3;
 
     protected boolean mStarted = false;
 
@@ -140,42 +151,101 @@ public class MainActivity extends SDLActivity
     }
 
     /**
+     * Maps the "runtime_mode" extra to a runtime id, or null when the value is
+     * missing or unknown.
+     *   r3,  ruby3   -> r3
+     *   r18          -> r18   (Ruby 3.1 build that will get the Ruby 1.8 patches)
+     *   r187, ruby18 -> r187  (real Ruby 1.8.7; "ruby18" keeps its old meaning
+     *                          until Phase B switches it to r18)
+     */
+    private static String runtimeFromMode(String mode)
+    {
+        if (mode == null) return null;
+        switch (mode.trim().toLowerCase(Locale.ROOT)) {
+            case "r3":
+            case "ruby3":
+                return RT_R3;
+            case "r18":
+                return RT_R18;
+            case "r187":
+            case "ruby18":
+                return RT_R187;
+            default:
+                return null;
+        }
+    }
+
+    /**
      * Select a native VM before SDL loads any libraries. The launcher may pass
-     * runtime_mode=ruby18 or runtime_mode=ruby3 to select a runtime explicitly.
-     * Auto mode uses Ruby 3.1: Windows ProductVersion is not reliable evidence
+     * runtime_mode to select a runtime explicitly (see runtimeFromMode).
+     * Auto mode uses r3 (Ruby 3.1): Windows ProductVersion is not reliable evidence
      * of an RGSS generation, so it must not silently switch existing games.
      */
     private void selectRubyRuntime(Intent intent)
     {
         String requested = intent == null ? null : intent.getStringExtra(EXTRA_RUNTIME_MODE);
-        if ("ruby18".equalsIgnoreCase(requested)) {
-            sUseRuby18 = true;
-            Log.i(TAG, "Ruby runtime override: 1.8.7");
-            return;
-        }
-        if ("ruby3".equalsIgnoreCase(requested)) {
-            sUseRuby18 = false;
-            Log.i(TAG, "Ruby runtime override: 3.1");
+        String id = runtimeFromMode(requested);
+        if (id != null) {
+            sRuntimeId = id;
+            Log.i(TAG, "Runtime override: " + id + " (runtime_mode=" + requested + ")");
             return;
         }
 
-        sUseRuby18 = false;
-        Log.i(TAG, "Ruby runtime auto-select: 3.1 (safe default; no explicit runtime_mode)");
+        sRuntimeId = RT_R3;
+        if (requested != null && !requested.isEmpty()) {
+            Log.w(TAG, "Unknown runtime_mode \"" + requested + "\", using r3");
+        } else {
+            Log.i(TAG, "Runtime auto-select: r3 (safe default; no explicit runtime_mode)");
+        }
+    }
+
+    /**
+     * File names (without "lib" and ".so") of the Ruby library and the engine
+     * library of a runtime. The Ruby library is listed BEFORE the engine on purpose:
+     * the engine records "NEEDED libruby.so", and Android's linker satisfies that with
+     * the library that is already loaded and has that internal SONAME. The APK has no
+     * file named libruby.so, so a wrong runtime can never be picked up by accident.
+     */
+    private static String[] runtimeLibs(String id)
+    {
+        if (RT_R18.equals(id)) return new String[] { "ruby_r18", "mkxp-z-r18" };
+        if (RT_R187.equals(id)) return new String[] { "ruby18", "mkxp-z-ruby18" };
+        return new String[] { "ruby_r3", "mkxp-z-r3" };
     }
 
     @Override
     protected String[] getLibraries()
     {
-        if (sUseRuby18) {
-            return new String[] {
-                "SDL2", "SDL2_image", "SDL2_ttf", "SDL2_sound", "openal",
-                "ruby18", "mkxp-z-ruby18"
-            };
-        }
+        String[] rt = runtimeLibs(sRuntimeId);
         return new String[] {
             "SDL2", "SDL2_image", "SDL2_ttf", "SDL2_sound", "openal",
-            "ruby", "mkxp-z"
+            rt[0], rt[1]
         };
+    }
+
+    /** The engine library of the selected runtime (the one that exports SDL_main). */
+    @Override
+    protected String getMainSharedObject()
+    {
+        String engine = runtimeLibs(sRuntimeId)[1];
+        return getContext().getApplicationInfo().nativeLibDir + "/lib" + engine + ".so";
+    }
+
+    @Override
+    public void loadLibraries()
+    {
+        Log.i(TAG, "Loading runtime " + sRuntimeId + ": " + Arrays.toString(getLibraries()));
+        for (String lib : getLibraries()) {
+            try {
+                SDL.loadLibrary(lib);
+            } catch (UnsatisfiedLinkError e) {
+                // Typical message if the SONAME match did not work:
+                //   dlopen failed: library "libruby.so" not found: needed by ...
+                Log.e(TAG, "Could not load native library \"" + lib + "\" (runtime "
+                        + sRuntimeId + "): " + e.getMessage());
+                throw e;
+            }
+        }
     }
 
     private static boolean isRuby18ProductVersion(String version)
@@ -250,7 +320,21 @@ public class MainActivity extends SDLActivity
         super.onNewIntent(intent);
 
         String dir = intent.getStringExtra(EXTRA_GAME_DIR);
-        if (dir != null && !dir.isEmpty() && !new File(dir).getAbsolutePath().equals(GAME_PATH)) {
+        String mode = intent.getStringExtra(EXTRA_RUNTIME_MODE);
+        boolean anyplayLaunch = (dir != null && !dir.isEmpty()) || (mode != null && !mode.isEmpty());
+
+        boolean otherGame = dir != null && !dir.isEmpty()
+                && !new File(dir).getAbsolutePath().equals(GAME_PATH);
+
+        // Same rule as selectRubyRuntime(): no/unknown mode means r3. Only checked for a
+        // real AnyPlay launch, so e.g. a USB-attach intent never closes a running game.
+        String wanted = runtimeFromMode(mode);
+        if (wanted == null) wanted = RT_R3;
+        boolean otherRuntime = anyplayLaunch && !wanted.equals(sRuntimeId);
+
+        if (otherGame || otherRuntime) {
+            Log.i(TAG, "New launch needs a fresh process (otherGame=" + otherGame
+                    + ", otherRuntime=" + otherRuntime + ", running=" + sRuntimeId + ", wanted=" + wanted + ")");
             Toast.makeText(this, "Closing the running game. Open the new game again.", Toast.LENGTH_LONG).show();
             finish(); // onDestroy() exits the process, so the next launch is clean
         }
