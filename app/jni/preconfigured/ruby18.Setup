@@ -1,9 +1,0 @@
-# Only build the extensions the RGSS runtime needs by default. The old MRI
-# extconf scripts for optional desktop and OpenSSL modules do not target Bionic.
-digest
-enumerator
-fcntl
-socket
-stringio
-strscan
-zlib
