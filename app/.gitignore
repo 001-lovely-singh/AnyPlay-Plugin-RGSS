@@ -14,6 +14,7 @@ jni/openssl/
 jni/physfs/
 jni/pixman/
 jni/ruby/
+jni/ruby-r18/
 jni/SDL2/
 jni/SDL2_image/
 jni/SDL2_sound/
