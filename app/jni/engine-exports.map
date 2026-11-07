@@ -1,0 +1,18 @@
+/*
+ * Version script for the mkxp-z engine libraries (libmkxp-z-r3.so, libmkxp-z-r18.so).
+ *
+ * The engine is only ever started through SDL (SDLActivity does dlopen + dlsym
+ * "SDL_main"), so that is the only symbol other code needs to see. Everything
+ * else (the engine itself plus the statically linked OpenSSL, physfs, pixman,
+ * iconv, ...) stays private to the engine. That stops the engine's static copies
+ * from being mixed up with the copies inside libruby.so or other libraries.
+ *
+ * Do NOT add JNI_OnLoad or Java_* names here unless the engine really defines
+ * them: the verify-runtimes.sh check expects exactly the names listed below.
+ */
+{
+  global:
+    SDL_main;
+  local:
+    *;
+};
