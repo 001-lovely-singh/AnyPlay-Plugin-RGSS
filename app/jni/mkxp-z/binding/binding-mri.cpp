@@ -58,6 +58,16 @@ extern "C" {
 #include <string>
 #include <zlib.h>
 
+#ifdef MKXPZ_BUILD_ANDROID
+#include <android/log.h>
+#endif
+
+/* AnyPlay: id of the runtime this engine library belongs to (r3, r18, r187).
+ * Set by mkxp-z.mk with -DMKXPZ_RUNTIME_ID. */
+#ifndef MKXPZ_RUNTIME_ID
+#define MKXPZ_RUNTIME_ID "unknown"
+#endif
+
 #include <SDL_cpuinfo.h>
 #include <SDL_filesystem.h>
 #include <SDL_loadso.h>
@@ -1419,6 +1429,26 @@ static void mriBindingExecute() {
 #endif
 #endif
     
+    /* AnyPlay: runtime self-report. Ruby is up at this point, so RUBY_DESCRIPTION
+     * is the one of the libruby that is REALLY loaded. It goes to logcat (tag
+     * "mkxp-z[runtime]") and into $__anyplay_runtime, which AnyPlayLog prints in
+     * its header. Used to confirm that r3 and r18 each boot their own Ruby. */
+    {
+        rb_gv_set("$__anyplay_runtime", rb_str_new_cstr(MKXPZ_RUNTIME_ID));
+#ifdef MKXPZ_BUILD_ANDROID
+        int descState = 0;
+        VALUE desc = rb_eval_string_protect("(RUBY_DESCRIPTION rescue RUBY_VERSION).to_s", &descState);
+        if (!descState && TYPE(desc) == T_STRING) {
+            __android_log_print(ANDROID_LOG_INFO, "mkxp-z[runtime]",
+                                "runtime=%s RUBY_DESCRIPTION=%.*s",
+                                MKXPZ_RUNTIME_ID, (int)RSTRING_LEN(desc), RSTRING_PTR(desc));
+        } else {
+            __android_log_print(ANDROID_LOG_WARN, "mkxp-z[runtime]",
+                                "runtime=%s (could not read RUBY_DESCRIPTION)", MKXPZ_RUNTIME_ID);
+        }
+#endif
+    }
+
     VALUE rbArgv = rb_get_argv();
     for (const auto &str : conf.launchArgs)
         rb_ary_push(rbArgv, rb_utf8_str_new_cstr(str.c_str()));
@@ -1842,7 +1872,7 @@ end
 # catches itself - those are marked), (3) the final error that stopped the game
 # with the full call chain, and (4) a few notes (touch / slow frames) for context.
 module AnyPlayLog
-  VERSION   = "0.1.40"
+  VERSION   = "0.1.41"
   FILE      = "AnyPlayLog.txt"
   MAX_BYTES = 250_000
   CAPS      = { error: 200, note: 400 }
@@ -1937,7 +1967,7 @@ module AnyPlayLog
       eng = (AnyPlayCheats.engine rescue "?")
       gt  = (System.game_title rescue "?") rescue "?"
       raw("==== AnyPlay log (plugin #{VERSION}) #{Time.now.strftime('%Y-%m-%d %H:%M:%S')} ====")
-      raw("game=#{clean(gt, 80)} folder=#{Dir.pwd} engine=#{eng} ruby=#{RUBY_VERSION} #{RUBY_PLATFORM}")
+      raw("game=#{clean(gt, 80)} folder=#{Dir.pwd} engine=#{eng} runtime=#{$__anyplay_runtime || '?'} ruby=#{RUBY_VERSION} #{RUBY_PLATFORM}")
       raw("screen=#{(Graphics.width rescue '?')}x#{(Graphics.height rescue '?')} fps=#{(Graphics.frame_rate rescue '?')} scripts=#{($RGSS_SCRIPTS.size rescue '?')}")
     end
 
