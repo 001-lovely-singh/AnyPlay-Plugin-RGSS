@@ -58,6 +58,19 @@ else
 	RUBY18_PREFIX := $(RUBY18_BUILD_PREFIX)
 endif
 
+# Second Ruby 3.1 build ("r18" runtime). Same source branch as "ruby", but a separate
+# source tree (ruby-r18/) and a separate install prefix, so the two libruby.so
+# files can never overwrite each other and can be patched differently later.
+R18_BUILD_PREFIX := ${PWD}/build-r18-$(ABI)
+R18_LIBDIR := $(R18_BUILD_PREFIX)/lib
+ifneq (, ${MSYSTEM})
+	R18_PREFIX := $(shell cygpath -m ${R18_BUILD_PREFIX})
+else ifneq (, $(findstring /cygdrive/,$(PATH)))
+	R18_PREFIX := $(shell cygpath -m ${R18_BUILD_PREFIX})
+else
+	R18_PREFIX := $(R18_BUILD_PREFIX)
+endif
+
 # Toolchain tools
 CC      := $(TOOLCHAIN)/bin/$(PREFIX)-clang
 CXX     := $(TOOLCHAIN)/bin/$(PREFIX)-clang++
@@ -156,11 +169,15 @@ RUBY_CONFIGURE_ARGS := \
 	--with-out-ext=readline,dbm,gdbm,win32,win32ole,fiddle \
 	--without-gmp
 
+# Same options as RUBY_CONFIGURE_ARGS, only the install prefix differs.
+# (A later --prefix on the configure command line overrides the earlier one.)
+RUBY_R18_CONFIGURE_ARGS := $(patsubst --prefix=%,--prefix="$(R18_PREFIX)",$(RUBY_CONFIGURE_ARGS))
+
 CONFIGURE := $(CONFIGURE_ENV) ./configure $(CONFIGURE_ARGS)
 CMAKE     := $(CONFIGURE_ENV) cmake .. $(CMAKE_ARGS)
 
 
-.PHONY: all init clean cpufeatures pixman iconv openal openssl ruby ruby18 clean-pixman clean-iconv clean-openal clean-openssl clean-ruby clean-ruby18
+.PHONY: all init clean cpufeatures pixman iconv openal openssl ruby ruby-r18 ruby18 clean-pixman clean-iconv clean-openal clean-openssl clean-ruby clean-ruby-r18 clean-ruby18
 
 default: all
 
@@ -232,6 +249,23 @@ ruby/Makefile: ruby/configure
 ruby/configure: ruby/configure.ac
 	cd ruby; autoreconf -i
 
+# -------------------- Ruby 3.1 for the "r18" runtime --------------------
+# Installs into build-r18-<abi>/ (headers in include/ruby-3.1.0, library in
+# lib/libruby.so). The SONAME is "libruby.so" on purpose: it is the same SONAME
+# for r3 and r18, and the APK keeps the two files apart by FILE NAME
+# (libruby_r3.so / libruby_r18.so, see ruby.mk).
+ruby-r18: init openssl $(R18_LIBDIR)/libruby.so.3.1.0
+
+$(R18_LIBDIR)/libruby.so.3.1.0: ruby-r18/Makefile
+	cd ruby-r18; make -j$(NPROC); make install
+
+ruby-r18/Makefile: ruby-r18/configure
+	cd ruby-r18; DLDFLAGS="-Wl,-soname,libruby.so" \
+	$(CONFIGURE) $(RUBY_R18_CONFIGURE_ARGS)
+
+ruby-r18/configure: ruby-r18/configure.ac
+	cd ruby-r18; autoreconf -i
+
 # -------------------- Ruby 1.8.7 --------------------
 ruby18: init $(RUBY18_LIBDIR)/libruby18.so
 
@@ -286,9 +320,12 @@ clean-openssl:
 clean-ruby:
 	-cd ruby; make clean; rm Makefile; rm configure
 
+clean-ruby-r18:
+	-cd ruby-r18; make clean; rm Makefile; rm configure
+
 clean-ruby18:
 	-cd ruby18; make clean; rm -f Makefile configure
 
-clean: clean-pixman clean-iconv clean-openal clean-openssl clean-ruby clean-ruby18
+clean: clean-pixman clean-iconv clean-openal clean-openssl clean-ruby clean-ruby-r18 clean-ruby18
 
-all: pixman iconv openal openssl ruby ruby18
+all: pixman iconv openal openssl ruby ruby-r18 ruby18
