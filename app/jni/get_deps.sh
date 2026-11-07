@@ -95,6 +95,15 @@ if [[ ! -d "ruby" ]]; then
   git clone $GIT_ARGS -b mkxp-z-3.1 https://github.com/mkxp-z/ruby ruby
 fi
 
+# Second, independent copy of the same Ruby 3.1 source for the "r18" runtime.
+# It is built into its own prefix (build-r18-<abi>) so that the legacy (Ruby 1.8
+# compatibility) patches of Phase B can be applied to THIS tree only, without
+# touching the clean "r3" Ruby above.
+if [[ ! -d "ruby-r18" ]]; then
+  echo "Downloading Ruby (r18 copy)..."
+  git clone $GIT_ARGS -b mkxp-z-3.1 https://github.com/mkxp-z/ruby ruby-r18
+fi
+
 # Ruby 1.8.7 (mkxp-z compatibility fork; kept separate from Ruby 3.1)
 if [[ ! -d "ruby18" ]]; then
   echo "Downloading Ruby 1.8.7..."
