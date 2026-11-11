@@ -243,7 +243,7 @@ lambda { |s, name|
         // on a phone and gives the same answer on every launch, so its result is kept in
         // AnyPlay_script_cache.bin, keyed by script name + content checksum.
         VALUE cachedFix = rb_eval_string(R"RB(
-$__anyplay_ncache_ver = "n1-v9"
+$__anyplay_ncache_ver = "n2-v9"
 $__anyplay_ncache_t0 = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 $__anyplay_nhits = 0
 $__anyplay_ncount = 0
@@ -258,17 +258,17 @@ lambda { |s, name|
   begin
     $__anyplay_ncount += 1
     key = [s.bytesize, s.sum(32), (defined?(Zlib) && Zlib.respond_to?(:crc32) ? Zlib.crc32(s) : 0), s[0, 48], s[-48, 48]]
-    ent = $__anyplay_ncache[:s][name.to_s]
-    if ent && ent[0] == key && ent[1].is_a?(String)
-      ($__anyplay_src ||= {})[name.to_s] = ent[1]
-      ($__anyplay_syntax_errors ||= []).concat(ent[2]) if ent[2].is_a?(Array) && !ent[2].empty?
+    ent = $__anyplay_ncache[:s][key]
+    if ent && ent[0].is_a?(String)
+      ($__anyplay_src ||= {})[name.to_s] = ent[0]
+      ($__anyplay_syntax_errors ||= []).concat(ent[1]) if ent[1].is_a?(Array) && !ent[1].empty?
       $__anyplay_nhits += 1
-      next ent[1]
+      next ent[0]
     end
     before = ($__anyplay_syntax_errors ||= []).size
     out = $__anyplay_compatfix.call(s, name)
     errs = $__anyplay_syntax_errors[before..-1] || []
-    $__anyplay_ncache[:s][name.to_s] = [key, out, errs]
+    $__anyplay_ncache[:s][key] = [out, errs]
     $__anyplay_ncache_dirty = true
     out
   rescue Exception
