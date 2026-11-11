@@ -3561,14 +3561,23 @@ module AnyPlayPerf
               @__ap_repush += 1
               if @__ap_repush == 3 || @__ap_repush == 45
                 begin
+                  @__ap_at_copies ||= []
                   7.times do |i|
                     bm = (@tilemap.autotiles[i] rescue nil)
                     next if bm.nil? || (bm.disposed? rescue true)
-                    tmp = Bitmap.new(32, 32)
-                    @tilemap.autotiles[i] = tmp
-                    @tilemap.autotiles[i] = bm
-                    tmp.dispose
+                    w = bm.width
+                    h = bm.height
+                    next if w <= 0 || h <= 0
+                    # a private copy: the game's cached bitmap is shared and can be disposed
+                    # or swapped behind the engine's back
+                    cp = Bitmap.new(w, h)
+                    cp.blt(0, 0, bm, Rect.new(0, 0, w, h))
+                    @tilemap.autotiles[i] = cp
+                    old = @__ap_at_copies[i]
+                    @__ap_at_copies[i] = cp
+                    (old.dispose if old && !old.equal?(cp) && !old.disposed?) rescue nil
                   end
+                  AnyPlayLog.write("autotile re-push #{@__ap_repush}: " + (@tilemap.anyplay_debug rescue "n/a"))
                 rescue Exception => e
                   AnyPlayLog.write("autotile re-push failed: #{e.class}: #{e.message}") rescue nil
                 end
