@@ -1,4 +1,3 @@
-
 name: Build AnyPlay RGSS Plugin
 
 on:
@@ -31,92 +30,48 @@ jobs:
     env:
       ANDROID_NDK_VERSION: 23.2.8568313
       RUBY_VERSION: "3.1"
+      # Optional r34 runtime (Ruby 3.4). Off unless the workflow is started by hand with
+      # build_r34 ticked; tag pushes always build without it. Read by the Makefile and
+      # by ndk-build (Android.mk).
       BUILD_R34: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.build_r34 == 'true') && '1' || '0' }}
       BUILD_R34_YJIT: ${{ (github.event_name == 'workflow_dispatch' && github.event.inputs.build_r34 == 'true' && github.event.inputs.r34_yjit == 'true') && '1' || '0' }}
 
     steps:
-      # 1. Checkout
+      # ── 1. Checkout ──────────────────────────────────────────────────────────
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           submodules: recursive
 
-      # 2. Java
+      # ── 2. Java (required by Gradle / Android SDK) ───────────────────────────
       - name: Set up JDK 17
         uses: actions/setup-java@v4
         with:
           java-version: '17'
           distribution: 'temurin'
 
-      # 3. System dependencies (Fixed Ubuntu mirror + retries)
+      # ── 3. System dependencies ───────────────────────────────────────────────
       - name: Install system dependencies
         run: |
-          set -e
+          sudo apt-get update -y
+          sudo apt-get install -y \
+            build-essential cmake curl gpg xxd \
+            ruby-full autoconf automake libtool pkg-config \
+            python3 git unzip bison gperf
 
-          echo "Checking and fixing Ubuntu package mirrors..."
-
-          # Replace Azure mirror with the official Ubuntu archive mirror.
-          sudo find /etc/apt -type f \( -name '*.list' -o -name '*.sources' \) \
-            -exec sed -i 's/azure.archive.ubuntu.com/archive.ubuntu.com/g' {} +
-
-          echo "Updated Ubuntu package mirrors."
-
-          # Update package lists with automatic retries.
-          for attempt in 1 2 3; do
-            echo "APT update attempt $attempt/3..."
-
-            if sudo apt-get update \
-              -o Acquire::Retries=5 \
-              -o Acquire::http::Timeout=30 \
-              -o Acquire::https::Timeout=30; then
-              break
-            fi
-
-            if [ "$attempt" -eq 3 ]; then
-              echo "ERROR: apt-get update failed after 3 attempts."
-              exit 1
-            fi
-
-            echo "Waiting 15 seconds before retry..."
-            sleep 15
-          done
-
-          # Install required packages with retries.
-          for attempt in 1 2 3; do
-            echo "Package installation attempt $attempt/3..."
-
-            if sudo apt-get install -y \
-              -o Acquire::Retries=5 \
-              -o Acquire::http::Timeout=30 \
-              -o Acquire::https::Timeout=30 \
-              build-essential cmake curl gpg xxd \
-              ruby-full autoconf automake libtool pkg-config \
-              python3 git unzip bison gperf; then
-              break
-            fi
-
-            if [ "$attempt" -eq 3 ]; then
-              echo "ERROR: Dependency installation failed after 3 attempts."
-              exit 1
-            fi
-
-            echo "Refreshing package lists before retry..."
-            sudo apt-get update -o Acquire::Retries=5
-            sleep 15
-          done
-
-          echo "System dependencies installed successfully."
-
-      # 4. Ruby
+      # ── 4. Ruby  ──────────────────────────────────────
       - name: Set up Ruby
         uses: ruby/setup-ruby@v1
         with:
           ruby-version: ${{ env.RUBY_VERSION }}
 
-      # 5. Android SDK
+      # ── 5. Android SDK ────────────────────────────────────────────────────────
       - name: Set up Android SDK
         uses: android-actions/setup-android@v3
         with:
+          # AnyPlay fix: the default package list ("tools platform-tools") fails with
+          # "Failed to find package 'tools'" because 'tools' no longer exists.
+          # Install nothing here; the NDK is installed by the next step.
           packages: ''
 
       - name: Install Android NDK ${{ env.ANDROID_NDK_VERSION }}
@@ -124,7 +79,7 @@ jobs:
           sdkmanager --install "ndk;${{ env.ANDROID_NDK_VERSION }}"
           echo "ANDROID_NDK_HOME=$ANDROID_HOME/ndk/${{ env.ANDROID_NDK_VERSION }}" >> "$GITHUB_ENV"
 
-      # 5b. Rust (only for r34 with YJIT)
+      # ── 5b. Rust (only for r34 with YJIT) ────────────────────────────────────
       - name: Set up Rust for YJIT (r34)
         if: env.BUILD_R34_YJIT == '1'
         run: |
@@ -136,18 +91,18 @@ jobs:
           rustup target add aarch64-linux-android
           rustc --version
 
-      # 6. Export toolchain paths
+      # ── 6. Export toolchain paths ─────────────────────────────────────────────
       - name: Export NDK toolchain paths
         run: |
           ARCH=linux-x86_64
           NDK_PATH="$ANDROID_HOME/ndk/${{ env.ANDROID_NDK_VERSION }}"
           TOOLCHAIN="$NDK_PATH/toolchains/llvm/prebuilt/$ARCH/bin"
-          echo "ANDROID_HOME=$ANDROID_HOME" >> "$GITHUB_ENV"
-          echo "ANDROID_NDK_HOME=$NDK_PATH" >> "$GITHUB_ENV"
-          echo "ARCH=$ARCH" >> "$GITHUB_ENV"
-          echo "$TOOLCHAIN" >> "$GITHUB_PATH"
+          echo "ANDROID_HOME=$ANDROID_HOME"           >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$NDK_PATH"           >> "$GITHUB_ENV"
+          echo "ARCH=$ARCH"                            >> "$GITHUB_ENV"
+          echo "$TOOLCHAIN"                            >> "$GITHUB_PATH"
 
-      # 7. Download JNI dependencies & Generate XXD
+      # ── 7. Download JNI dependencies & Generate XXD ──────────────────────────
       - name: Download JNI dependencies (get_deps.sh)
         working-directory: app/jni
         run: |
@@ -157,7 +112,7 @@ jobs:
           chmod +x make_xxd.sh
           ./make_xxd.sh
 
-      # 8. Compile native dependencies (arm64-v8a)
+      # ── 8. Compile native dependencies (arm64-v8a) ───────────────────────────
       - name: Compile native deps — arm64-v8a (64-bit)
         working-directory: app/jni
         run: |
@@ -166,47 +121,44 @@ jobs:
           ABI=arm64-v8a \
           LDFLAGS="-Wl,-z,max-page-size=16384" \
           make -j$(nproc)
-
-          if [ -d "build-arm64-v8a" ] && [ ! -d "build-arm64" ]; then
-            ln -s build-arm64-v8a build-arm64
-          fi
-
+          # Asegurar mapeo de carpetas por si acaso
+          if [ -d "build-arm64-v8a" ] && [ ! -d "build-arm64" ]; then ln -s build-arm64-v8a build-arm64; fi
+          # Both Ruby 3.1 builds (r3 and r18) must exist, each in its own prefix.
           test -f build-arm64-v8a/lib/libruby.so
           test -f build-r18-arm64-v8a/lib/libruby.so
+          if [ "$BUILD_R34" = "1" ]; then test -f build-r34-arm64-v8a/lib/libruby.so; fi
 
-          if [ "$BUILD_R34" = "1" ]; then
-            test -f build-r34-arm64-v8a/lib/libruby.so
-          fi
-
-      # 8b. Compile native deps (armeabi-v7a, 32-bit)
+      # ── 8b. Compile native deps (armeabi-v7a, 32-bit phones) ─────────────────
+      # AnyPlay: added so the APK also runs on 32-bit ARM phones.
+      # (Application.mk and app/build.gradle already list armeabi-v7a.)
       - name: Compile native deps — armeabi-v7a (32-bit)
         working-directory: app/jni
         run: |
+          # The dependency sources (pixman, openal, openssl, ruby...) are built IN-TREE and
+          # stay configured for the previous ABI (arm64). Without a clean, make thinks
+          # everything is already built and never creates build-armeabi-v7a/lib/*.
+          # `make clean` only removes the in-tree build state; build-arm64-v8a/ is kept.
           make clean
-
           HOST=armv7a-linux-androideabi \
           TARGET=arm-linux-androideabi \
           ABI=armeabi-v7a \
           make -j$(nproc)
-
           ls -la build-armeabi-v7a/lib | head -30
-
           test -f build-armeabi-v7a/lib/libopenal.so
           test -d build-arm64-v8a/lib
           test -f build-armeabi-v7a/lib/libruby.so
           test -f build-r18-armeabi-v7a/lib/libruby.so
           test -f build-r18-arm64-v8a/lib/libruby.so
-
           if [ "$BUILD_R34" = "1" ]; then
             test -f build-r34-armeabi-v7a/lib/libruby.so
             test -f build-r34-arm64-v8a/lib/libruby.so
           fi
 
-      # 9. Make Gradle wrapper executable
+      # ── 9. Make Gradle wrapper executable ────────────────────────────────────
       - name: Grant execute permission for gradlew
         run: chmod +x gradlew
 
-      # 10. Cache Gradle packages
+      # ── 10. Cache Gradle packages ─────────────────────────────────────────────
       - name: Cache Gradle packages
         uses: actions/cache@v4
         with:
@@ -217,7 +169,7 @@ jobs:
           restore-keys: |
             gradle-${{ runner.os }}-
 
-      # 11. Signing key
+      # ── 11. Signing key (kept in GitHub Secrets, never in the repo) ───────────
       - name: Prepare signing key
         env:
           KS_B64: ${{ secrets.ANYPLAY_KEYSTORE_BASE64 }}
@@ -232,7 +184,7 @@ jobs:
             echo "No signing secrets found: the APK will be signed with a temporary debug key."
           fi
 
-      # 12. Build release APK
+      # ── 12. Build release APK ─────────────────────────────────────────────────
       - name: Build release APK
         run: |
           ./gradlew assembleRelease \
@@ -240,33 +192,27 @@ jobs:
             --no-daemon \
             --stacktrace
 
-      # 12b. Name the APK
+      # ── 12b. Pick the universal APK (64-bit + 32-bit) and give it its final name
       - name: Name the APK
         run: |
           find app/build/outputs/apk/release -name "*.apk"
-
           APK=$(find app/build/outputs/apk/release -name "*universal*.apk" | head -1)
-
-          if [ -z "$APK" ]; then
-            APK=$(find app/build/outputs/apk/release -name "*.apk" | head -1)
-          fi
-
-          if [ -z "$APK" ]; then
-            echo "ERROR: No APK found!"
-            exit 1
-          fi
-
+          if [ -z "$APK" ]; then APK=$(find app/build/outputs/apk/release -name "*.apk" | head -1); fi
           cp "$APK" AnyPlay-RGSS-Plugin.apk
           echo "APK_PATH=AnyPlay-RGSS-Plugin.apk" >> "$GITHUB_ENV"
 
-      # 12c. Verify native runtimes
+      # ── 12c. Check the native runtimes inside the final APK ──────────────────
+      # r3 and r18 must each have their own libruby (SONAME libruby.so), each engine
+      # must NEED libruby.so and export only SDL_main. Fails the build otherwise.
       - name: Verify runtime libraries in the APK
+        # First Phase A build: report problems but do not block the release.
+        # Remove this line once the check has been green on a real build.
         continue-on-error: true
         run: |
           chmod +x app/jni/verify-runtimes.sh
           app/jni/verify-runtimes.sh "$APK_PATH"
 
-      # 13. Upload APK artifact
+      # ── 13. Upload APK as artifact (always) ───────────────────────────────────
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
         with:
@@ -274,7 +220,7 @@ jobs:
           path: ${{ env.APK_PATH }}
           retention-days: 30
 
-      # 14. Determine release tag
+      # ── 14. Determine release tag ─────────────────────────────────────────────
       - name: Resolve release tag
         id: tag
         run: |
@@ -284,7 +230,9 @@ jobs:
             echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
           fi
 
-      # 15. Create GitHub Release and upload APK
+      # ── 15. Create GitHub Release and upload APK ──────────────────────────────
+      # The text of the release comes from RELEASE_NOTES.md in the repo: edit that
+      # file before you create a new tag.
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
