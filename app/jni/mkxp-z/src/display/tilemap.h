@@ -26,6 +26,8 @@
 
 #include "util.h"
 
+#include <string>
+
 class Viewport;
 class Bitmap;
 class Table;
@@ -75,6 +77,9 @@ public:
 	DECL_ATTR( Tone,      Tone&   )
 
 	void initDynAttribs();
+
+	/* AnyPlay: one-line description of the atlas / autotile state (for logs) */
+	std::string debugInfo();
 
 private:
 	TilemapPrivate *p;
