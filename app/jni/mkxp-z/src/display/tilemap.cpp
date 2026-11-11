@@ -274,6 +274,8 @@ struct TilemapPrivate
 
 	/* AnyPlay: autotile quads produced by the last buildQuadArray (diagnostics) */
 	int dbgATQuads[autotileCount] = {0};
+	int dbgSets[autotileCount] = {0};
+	int dbgSetDisp[autotileCount] = {0};
 
 	/* Map viewport position */
 	Vec2i viewpPos;
@@ -1182,6 +1184,9 @@ void Tilemap::Autotiles::set(int i, Bitmap *bitmap)
 	if (i < 0 || i > autotileCount-1)
 		return;
 
+	++p->dbgSets[i];
+	p->dbgSetDisp[i] = bitmap ? (bitmap->isDisposed() ? 1 : 0) : -1;
+
 	if (p->autotiles[i] == bitmap)
 		return;
 
@@ -1254,10 +1259,18 @@ std::string Tilemap::debugInfo()
 
 	for (int i = 0; i < autotileCount; ++i)
 	{
-		bool usable = !nullOrDisposed(p->autotiles[i]) && !p->autotiles[i]->megaSurface();
+		Bitmap *bm = p->autotiles[i];
+		const char *why = "ok";
 
-		snprintf(buf, sizeof(buf), " | at%d:%s,small=%d,frames=%d,quads=%d",
-		         i, usable ? "ok" : "unusable", (int) p->atlas.smallATs[i],
+		if (!bm)
+			why = "null";
+		else if (bm->isDisposed())
+			why = "disposed";
+		else if (bm->megaSurface())
+			why = "mega";
+
+		snprintf(buf, sizeof(buf), " | a%d:%s s=%d d=%d f=%d q=%d",
+		         i, why, p->dbgSets[i], p->dbgSetDisp[i],
 		         (int) p->atlas.nATFrames[i], p->dbgATQuads[i]);
 		out += buf;
 	}
