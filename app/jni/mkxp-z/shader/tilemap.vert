@@ -30,12 +30,16 @@ void main()
      * the uniform array index in range (the result is masked by 'pred'). */
     if (atIndex > nAutotiles - 1) atIndex = nAutotiles - 1;
 
-    lowp int pred = int(tex.x <= atAreaW && tex.y <= atAreaH);
-    lowp int frame = int(aniIndex - atFrames[atIndex] * (aniIndex / atFrames[atIndex]));
-    lowp int row = frame / 8;
-    lowp int col = frame - 8 * row;
-    tex.x += atAniOffsetX * float(col * pred);
-    tex.y += atAniOffsetY * float(row * pred);
+    /* Frame selection in float math: integer division on some mobile GPUs is
+     * imprecise for a growing counter, which pushed autotiles (tall grass...)
+     * to an empty part of the atlas. */
+    float pred = float(tex.x <= atAreaW && tex.y <= atAreaH);
+    float nFrames = max(float(atFrames[atIndex]), 1.0);
+    float frame = mod(float(aniIndex), nFrames);
+    float row = floor(frame / 8.0);
+    float col = frame - 8.0 * row;
+    tex.x += atAniOffsetX * col * pred;
+    tex.y += atAniOffsetY * row * pred;
 
     gl_Position = projMat * vec4(position + translation, 0, 1);
 
