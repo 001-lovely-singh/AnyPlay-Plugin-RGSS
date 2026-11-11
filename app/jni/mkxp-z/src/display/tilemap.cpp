@@ -42,6 +42,8 @@
 #include "sigslot/signal.hpp"
 
 #include <string.h>
+#include <stdio.h>
+#include <string>
 #include <stdint.h>
 #include <algorithm>
 #include <vector>
@@ -269,6 +271,9 @@ struct TilemapPrivate
 		/* The number of frames for each autotile */
 		int nATFrames[autotileCount] = {1};
 	} atlas;
+
+	/* AnyPlay: autotile quads produced by the last buildQuadArray (diagnostics) */
+	int dbgATQuads[autotileCount] = {0};
 
 	/* Map viewport position */
 	Vec2i viewpPos;
@@ -675,6 +680,8 @@ struct TilemapPrivate
 	{
 		/* Which autotile [0-7] */
 		int atInd = tileInd / 48 - 1;
+		if (atInd >= 0 && atInd < autotileCount)
+			++dbgATQuads[atInd];
 		if (!atlas.smallATs[atInd])
 		{
 			/* Which tile pattern of the autotile [0-47] */
@@ -777,6 +784,9 @@ struct TilemapPrivate
 	void buildQuadArray()
 	{
 		clearQuadArrays();
+
+		for (int i = 0; i < autotileCount; ++i)
+			dbgATQuads[i] = 0;
 
 		int ox = viewpPos.x;
 		int oy = viewpPos.y;
@@ -1228,6 +1238,31 @@ void Tilemap::update()
 		return;
 
 	++p->tiles.aniIdx;
+}
+
+std::string Tilemap::debugInfo()
+{
+	guardDisposed();
+
+	std::string out;
+	char buf[200];
+
+	snprintf(buf, sizeof(buf), "atlas=%dx%d animated=%d ready=%d tick=%d ground_quads=%d",
+	         (int) p->atlas.size.x, (int) p->atlas.size.y, (int) p->tiles.animated,
+	         (int) p->tilemapReady, (int) p->tiles.aniIdx, (int) (p->groundVert.size() / 4));
+	out += buf;
+
+	for (int i = 0; i < autotileCount; ++i)
+	{
+		bool usable = !nullOrDisposed(p->autotiles[i]) && !p->autotiles[i]->megaSurface();
+
+		snprintf(buf, sizeof(buf), " | at%d:%s,small=%d,frames=%d,quads=%d",
+		         i, usable ? "ok" : "unusable", (int) p->atlas.smallATs[i],
+		         (int) p->atlas.nATFrames[i], p->dbgATQuads[i]);
+		out += buf;
+	}
+
+	return out;
 }
 
 Tilemap::Autotiles &Tilemap::getAutotiles()
