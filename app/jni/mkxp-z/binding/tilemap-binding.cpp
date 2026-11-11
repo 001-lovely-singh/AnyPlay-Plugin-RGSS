@@ -134,6 +134,15 @@ RB_METHOD(tilemapUpdate) {
     return Qnil;
 }
 
+RB_METHOD(tilemapDebugInfo) {
+    RB_UNUSED_PARAM;
+    
+    Tilemap *t = getPrivateData<Tilemap>(self);
+    std::string info = t->debugInfo();
+    
+    return rb_str_new(info.c_str(), (long) info.size());
+}
+
 RB_METHOD(tilemapGetViewport) {
     RB_UNUSED_PARAM;
     
@@ -181,6 +190,7 @@ void tilemapBindingInit() {
     _rb_define_method(klass, "update", tilemapUpdate);
     
     _rb_define_method(klass, "viewport", tilemapGetViewport);
+    _rb_define_method(klass, "anyplay_debug", tilemapDebugInfo);
     
     INIT_PROP_BIND(Tilemap, Tileset, "tileset");
     INIT_PROP_BIND(Tilemap, MapData, "map_data");
