@@ -3580,6 +3580,7 @@ module AnyPlayPerf
                   lane = lambda { |k| ((k - 384) / 8) / 365 }
                   w.call("tilemap v2: map=#{md.xsize}x#{md.ysize}x#{md.zsize} priorities=#{pr ? pr.xsize : 'nil'} " \
                          "autotile_cells=#{auto} tileset_ids=#{ids.size} max_row=#{ids.last ? (ids.last - 384) / 8 : '-'}")
+                  w.call("native tilemap: " + (@tilemap.anyplay_debug rescue "n/a (#{$!.class})"))
                   names = (tset.autotile_names rescue nil)
                   slots = (0..6).map do |i|
                     bm = (@tilemap.autotiles[i] rescue nil)
@@ -3631,6 +3632,28 @@ module AnyPlayPerf
       # do nothing so the battle starts instead of the game stopping.
       unless nil.respond_to?(:radial_blur)
         NilClass.class_eval { def radial_blur(*a); nil; end }
+      end
+      # The battle-start transition does "bitmap = Graphics.snap_to_bitmap" and then
+      # bitmap.dispose / bm.radial_blur. Here the game's version of snap_to_bitmap gives
+      # back nil, which stopped the game ("undefined method `dispose' for nil"). If that
+      # happens, use the engine's own screenshot instead.
+      begin
+        if Graphics.respond_to?(:snap_to_bitmap) && Graphics.respond_to?(:mkxp_snap_to_bitmap) &&
+           !Graphics.respond_to?(:__anyplay_snap)
+          Graphics.singleton_class.class_eval do
+            alias_method :__anyplay_snap, :snap_to_bitmap
+            def snap_to_bitmap(*a)
+              bm = __anyplay_snap(*a)
+              if bm.nil?
+                $__anyplay_snap_nil = ($__anyplay_snap_nil || 0) + 1
+                AnyPlayLog.write("Graphics.snap_to_bitmap gave nil, using the engine's own") if $__anyplay_snap_nil == 1
+                bm = mkxp_snap_to_bitmap
+              end
+              bm
+            end
+          end
+        end
+      rescue Exception
       end
     end
   rescue Exception
