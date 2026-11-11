@@ -3541,7 +3541,10 @@ module AnyPlayPerf
                 AnyPlayLog.write("native tilemap switch failed: #{e.class}: #{e.message}")
               end
             end
-            @__ap_dump = 150 if @tilemap.is_a?(SynchronizedTilemap)
+            if @tilemap.is_a?(SynchronizedTilemap)
+              @__ap_dump = 150
+              @__ap_repush = 0
+            end
             self.__anyplay_set_tileset(v)
           end
           # Diagnostic: a little after a big tileset is shown, write down which tile ids the
@@ -3550,6 +3553,28 @@ module AnyPlayPerf
           alias_method :__anyplay_update, :update
           def update(*a, &b)
             r = __anyplay_update(*a, &b)
+            # The engine's tilemap showed the tall-grass autotile (slot 1) as "unusable" even
+            # though the game holds a valid bitmap for it, so no grass was drawn. Hand every
+            # autotile bitmap to the engine again (through a throw-away bitmap so the engine
+            # does not skip it as "unchanged"); this rebuilds its atlas with them.
+            if @__ap_repush && @tilemap.is_a?(SynchronizedTilemap)
+              @__ap_repush += 1
+              if @__ap_repush == 3 || @__ap_repush == 45
+                begin
+                  7.times do |i|
+                    bm = (@tilemap.autotiles[i] rescue nil)
+                    next if bm.nil? || (bm.disposed? rescue true)
+                    tmp = Bitmap.new(32, 32)
+                    @tilemap.autotiles[i] = tmp
+                    @tilemap.autotiles[i] = bm
+                    tmp.dispose
+                  end
+                rescue Exception => e
+                  AnyPlayLog.write("autotile re-push failed: #{e.class}: #{e.message}") rescue nil
+                end
+              end
+              @__ap_repush = nil if @__ap_repush > 45
+            end
             if @__ap_dump
               @__ap_dump -= 1
               if @__ap_dump <= 0
