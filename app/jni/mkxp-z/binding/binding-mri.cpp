@@ -3544,6 +3544,7 @@ module AnyPlayPerf
             if @tilemap.is_a?(SynchronizedTilemap)
               @__ap_dump = 150
               @__ap_repush = 0
+              @__ap_at_ok = nil
             end
             self.__anyplay_set_tileset(v)
           end
@@ -3559,17 +3560,31 @@ module AnyPlayPerf
             # does not skip it as "unchanged"); this rebuilds its atlas with them.
             if @__ap_repush && @tilemap.is_a?(SynchronizedTilemap)
               @__ap_repush += 1
-              if @__ap_repush == 3 || @__ap_repush == 45
+              n = @__ap_repush
+              # frames 3 and 45, then every 15 frames until the engine accepts slot 1 (the game
+              # may fill that slot late, or never hand it to the engine at all)
+              if n == 3 || n == 45 || (n > 45 && n % 15 == 0 && !@__ap_at_ok)
                 begin
                   @__ap_at_copies ||= []
+                  names = nil
+                  begin
+                    names = $data_tilesets[$game_map.instance_variable_get(:@map).tileset_id].autotile_names
+                  rescue Exception
+                  end
                   7.times do |i|
+                    next if @__ap_at_copies[i] && !@__ap_at_copies[i].disposed? && n > 45
                     bm = (@tilemap.autotiles[i] rescue nil)
+                    if bm.nil? || (bm.disposed? rescue true)
+                      nm = names && names[i]
+                      if nm && !nm.to_s.empty?
+                        bm = (RPG::Cache.autotile(nm.to_s) rescue nil)
+                        bm = (Bitmap.new("Graphics/Autotiles/" + nm.to_s) rescue nil) if bm.nil? || (bm.disposed? rescue true)
+                      end
+                    end
                     next if bm.nil? || (bm.disposed? rescue true)
                     w = bm.width
                     h = bm.height
                     next if w <= 0 || h <= 0
-                    # a private copy: the game's cached bitmap is shared and can be disposed
-                    # or swapped behind the engine's back
                     cp = Bitmap.new(w, h)
                     cp.blt(0, 0, bm, Rect.new(0, 0, w, h))
                     @tilemap.autotiles[i] = cp
@@ -3577,12 +3592,19 @@ module AnyPlayPerf
                     @__ap_at_copies[i] = cp
                     (old.dispose if old && !old.equal?(cp) && !old.disposed?) rescue nil
                   end
-                  AnyPlayLog.write("autotile re-push #{@__ap_repush}: " + (@tilemap.anyplay_debug rescue "n/a"))
+                  dbg = (@tilemap.anyplay_debug rescue "n/a")
+                  @__ap_at_ok = true if dbg.include?("a1:ok")
+                  @__ap_at_logs = (@__ap_at_logs || 0) + 1
+                  AnyPlayLog.write("autotile re-push #{n}: " + dbg) if @__ap_at_logs <= 4 || @__ap_at_ok
                 rescue Exception => e
                   AnyPlayLog.write("autotile re-push failed: #{e.class}: #{e.message}") rescue nil
                 end
               end
-              @__ap_repush = nil if @__ap_repush > 45
+              if n > 600 || (@__ap_at_ok && n > 45)
+                @__ap_repush = nil
+                @__ap_at_ok = nil
+                @__ap_at_logs = nil
+              end
             end
             if @__ap_dump
               @__ap_dump -= 1
