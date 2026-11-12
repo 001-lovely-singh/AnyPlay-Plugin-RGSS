@@ -450,8 +450,29 @@ static PHYSFS_EnumerateCallbackResult cacheEnumCB(void *d, const char *origdir,
   std::string lowerCase = mixedCase;
   strTolower(lowerCase);
 
+  /* AnyPlay: asking the storage for the type of every one of the thousands of game files
+   * took ~14 s at every start on a phone. A name like "x.png" / "x.ogg" / "x.rxdata" is a
+   * file; only names that do not look like that are checked. */
   PHYSFS_Stat stat;
-  PHYSFS_stat(fullPath, &stat);
+  bool looksLikeFile = false;
+  {
+    const char *dot = strrchr(fname, '.');
+    if (dot && dot != fname) {
+      size_t n = strlen(dot + 1);
+      bool alpha = false, ok = (n >= 1 && n <= 6);
+      for (size_t k = 1; ok && k <= n; ++k) {
+        char c = dot[k];
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) alpha = true;
+        else if (!(c >= '0' && c <= '9')) ok = false;
+      }
+      looksLikeFile = ok && alpha;
+    }
+  }
+  if (looksLikeFile) {
+    stat.filetype = PHYSFS_FILETYPE_REGULAR;
+  } else {
+    PHYSFS_stat(fullPath, &stat);
+  }
 
   if (stat.filetype == PHYSFS_FILETYPE_DIRECTORY) {
     /* Create a new list for this directory */
