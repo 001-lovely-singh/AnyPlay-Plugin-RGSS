@@ -3561,50 +3561,78 @@ module AnyPlayPerf
             if @__ap_repush && @tilemap.is_a?(SynchronizedTilemap)
               @__ap_repush += 1
               n = @__ap_repush
-              # frames 3 and 45, then every 15 frames until the engine accepts slot 1 (the game
-              # may fill that slot late, or never hand it to the engine at all)
-              if n == 3 || n == 45 || (n > 45 && n % 15 == 0 && !@__ap_at_ok)
+              # The engine never got a bitmap for some autotile slots (the tall grass, slot 1).
+              # From frame 3 on, every 15 frames, give those slots a bitmap loaded straight from
+              # Graphics/Autotiles, and write down what happened (it tells why it failed).
+              if n == 3 || n == 45 || (n > 45 && n % 15 == 0)
                 begin
-                  @__ap_at_copies ||= []
-                  names = nil
-                  begin
-                    names = $data_tilesets[$game_map.instance_variable_get(:@map).tileset_id].autotile_names
-                  rescue Exception
-                  end
-                  7.times do |i|
-                    next if @__ap_at_copies[i] && !@__ap_at_copies[i].disposed? && n > 45
-                    bm = (@tilemap.autotiles[i] rescue nil)
-                    if bm.nil? || (bm.disposed? rescue true)
-                      nm = names && names[i]
-                      if nm && !nm.to_s.empty?
-                        bm = (RPG::Cache.autotile(nm.to_s) rescue nil)
-                        bm = (Bitmap.new("Graphics/Autotiles/" + nm.to_s) rescue nil) if bm.nil? || (bm.disposed? rescue true)
-                      end
+                  dbg = (@tilemap.anyplay_debug rescue "")
+                  bad = dbg.scan(/a(\d):(null|disposed|mega)/).map { |m| m[0].to_i }
+                  if bad.empty?
+                    @__ap_repush = nil if n > 45
+                  else
+                    @__ap_at_copies ||= []
+                    names = nil
+                    begin
+                      names = $data_tilesets[$game_map.instance_variable_get(:@map).tileset_id].autotile_names
+                    rescue Exception => e0
+                      names = nil
                     end
-                    next if bm.nil? || (bm.disposed? rescue true)
-                    w = bm.width
-                    h = bm.height
-                    next if w <= 0 || h <= 0
-                    cp = Bitmap.new(w, h)
-                    cp.blt(0, 0, bm, Rect.new(0, 0, w, h))
-                    @tilemap.autotiles[i] = cp
-                    old = @__ap_at_copies[i]
-                    @__ap_at_copies[i] = cp
-                    (old.dispose if old && !old.equal?(cp) && !old.disposed?) rescue nil
+                    diag = []
+                    bad.each do |i|
+                      nm = names && names[i].to_s
+                      step = "s#{i}:name=#{nm.inspect}"
+                      b = nil
+                      if nm && !nm.empty?
+                        begin
+                          b = Bitmap.new("Graphics/Autotiles/" + nm)
+                          step << " load=#{b.width}x#{b.height}"
+                        rescue Exception => e1
+                          step << " load!#{e1.class}:#{e1.message.to_s[0, 40]}"
+                          b = nil
+                        end
+                      end
+                      if b.nil?
+                        begin
+                          gb = @tilemap.autotiles[i]
+                          step << " arr=#{gb ? (gb.disposed? ? 'disp' : "#{gb.width}x#{gb.height}") : 'nil'}"
+                          if gb && !gb.disposed? && gb.width > 0 && gb.height > 0
+                            b = Bitmap.new(gb.width, gb.height)
+                            b.blt(0, 0, gb, Rect.new(0, 0, gb.width, gb.height))
+                          end
+                        rescue Exception => e2
+                          step << " arr!#{e2.class}"
+                          b = nil
+                        end
+                      end
+                      if b && !b.disposed? && b.width > 0 && b.height > 0
+                        begin
+                          @tilemap.autotiles[i] = b
+                          old = @__ap_at_copies[i]
+                          @__ap_at_copies[i] = b
+                          (old.dispose if old && !old.equal?(b) && !old.disposed?) rescue nil
+                          step << " set"
+                        rescue Exception => e3
+                          step << " set!#{e3.class}:#{e3.message.to_s[0, 40]}"
+                        end
+                      else
+                        step << " nobitmap"
+                      end
+                      diag << step
+                    end
+                    dbg2 = (@tilemap.anyplay_debug rescue "n/a")
+                    @__ap_at_logs = (@__ap_at_logs || 0) + 1
+                    if @__ap_at_logs <= 6 || !dbg2.include?("null")
+                      AnyPlayLog.write("autotile fix #{n}: " + diag.join(" ; "))
+                      AnyPlayLog.write("autotile fix #{n} after: " + dbg2)
+                    end
+                    @__ap_repush = nil if !dbg2.match?(/a\d:(null|disposed|mega)/) && n > 45
                   end
-                  dbg = (@tilemap.anyplay_debug rescue "n/a")
-                  @__ap_at_ok = true if dbg.include?("a1:ok")
-                  @__ap_at_logs = (@__ap_at_logs || 0) + 1
-                  AnyPlayLog.write("autotile re-push #{n}: " + dbg) if @__ap_at_logs <= 4 || @__ap_at_ok
                 rescue Exception => e
-                  AnyPlayLog.write("autotile re-push failed: #{e.class}: #{e.message}") rescue nil
+                  AnyPlayLog.write("autotile fix failed: #{e.class}: #{e.message}") rescue nil
                 end
               end
-              if n > 600 || (@__ap_at_ok && n > 45)
-                @__ap_repush = nil
-                @__ap_at_ok = nil
-                @__ap_at_logs = nil
-              end
+              @__ap_repush = nil if @__ap_repush && @__ap_repush > 600
             end
             if @__ap_dump
               @__ap_dump -= 1
