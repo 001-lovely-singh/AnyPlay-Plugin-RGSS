@@ -10,6 +10,7 @@
 #include <assert.h>
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <vector>
 
 #include "filesystem/filesystem.h"
@@ -95,6 +96,12 @@ bool getEnvironmentBool(const char *env, bool defaultValue) {
         return true;
     
     return defaultValue;
+}
+
+/* AnyPlay: value of an environment variable, "" if it is missing. */
+static std::string anyplayEnv(const char *name) {
+    const char *e = getenv(name);
+    return e ? std::string(e) : std::string();
 }
 
 json::value readConfFile(const char *path) {
@@ -212,7 +219,20 @@ try { exp } catch (...) {}
         }
     }
     
-    json::value baseConf = readConfFile(CONF_FILE);
+    // AnyPlay: zip game. The launcher puts copies of the game's own mkxp.json / Game.ini
+    // into the plugin's cache folder, because this code runs before the file system
+    // (and therefore the zip) is mounted.
+    zipPath = anyplayEnv("ANYPLAY_GAME_ZIP");
+    zipRoot = anyplayEnv("ANYPLAY_GAME_ZIP_ROOT");
+    
+    std::string baseConfPath = CONF_FILE;
+    if (!zipPath.empty()) {
+        std::string zj = anyplayEnv("ANYPLAY_ZIP_MKXP_JSON");
+        if (!zj.empty())
+            baseConfPath = zj;
+    }
+    
+    json::value baseConf = readConfFile(baseConfPath.c_str());
     copyObject(optsJ, baseConf);
     copyObject(opts["bindingNames"], baseConf.as_object()["bindingNames"], "bindingNames .");
     
@@ -236,7 +256,8 @@ try { exp } catch (...) {}
     SET_OPT(defScreenH, integer);
     
     // Take a break real quick and witch to set game folder and read the game's ini
-    if (!gameFolder.empty() && !mkxp_fs::setCurrentDirectory(gameFolder.c_str())) {
+    // (zip game: the current folder is the save folder, a gameFolder from the zip's mkxp.json is ignored)
+    if (zipPath.empty() && !gameFolder.empty() && !mkxp_fs::setCurrentDirectory(gameFolder.c_str())) {
         throw Exception(Exception::MKXPError, "Unable to switch into gameFolder %s", gameFolder.c_str());
     }
     
@@ -339,7 +360,14 @@ void Config::readGameINI() {
     }
     
     std::string iniFileName(execName + ".ini");
-    SDLRWStream iniFile(iniFileName.c_str(), "r");
+    std::string iniPath = iniFileName;
+    if (!zipPath.empty()) {
+        // AnyPlay: the game's Game.ini is inside the zip; the launcher left a copy.
+        std::string zi = anyplayEnv("ANYPLAY_ZIP_INI");
+        if (!zi.empty())
+            iniPath = zi;
+    }
+    SDLRWStream iniFile(iniPath.c_str(), "r");
     
     bool convSuccess = false;
     if (iniFile)
