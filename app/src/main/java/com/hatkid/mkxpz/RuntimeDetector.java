@@ -30,6 +30,9 @@ import java.util.regex.Pattern;
  *
  * File names are matched case-insensitively because Android's file system is case
  * sensitive while the Windows games were not ("data" vs "Data", "game.ini" vs "Game.ini").
+ *
+ * detectZip() does the same for a game that is played straight from a .zip, using the
+ * file list and the two small files that ZipGameInfo already read.
  */
 final class RuntimeDetector
 {
@@ -199,6 +202,122 @@ final class RuntimeDetector
         return null;
     }
 
+    /**
+     * Same signals as detect(File), but for a game inside a .zip (see ZipGameInfo).
+     * The "other signals disagree" part of the reason is kept, so a log line looks the
+     * same for folders and zips (it just starts with "zip: ").
+     */
+    static Detection detectZip(ZipGameInfo info)
+    {
+        if (info == null) return new Detection(0, "zip not readable");
+
+        int fromJson = 0, fromScripts = 0, fromLibrary = 0, fromData = 0, fromArchive = 0;
+        String jsonText = "", scriptsText = "", libraryText = "", dataText = "", archiveText = "";
+
+        if (info.jsonBytes != null) {
+            String text = stripJsonComments(decodeBytes(info.jsonBytes));
+            Matcher m = JSON_RGSS.matcher(text);
+            if (m.find()) {
+                int v = parseSmallInt(m.group(1));
+                if (v >= 1 && v <= 3) {
+                    fromJson = v;
+                    jsonText = "mkxp.json rgssVersion=" + v;
+                }
+            }
+        }
+
+        if (info.iniBytes != null) {
+            String scripts = null, library = null;
+            for (String line : decodeBytes(info.iniBytes).split("\r?\n|\r")) {
+                int eq = line.indexOf('=');
+                if (eq <= 0) continue;
+                String key = line.substring(0, eq).trim().toLowerCase(Locale.ROOT);
+                String val = line.substring(eq + 1).trim();
+                if (key.equals("scripts") && scripts == null) scripts = val;
+                else if (key.equals("library") && library == null) library = val;
+            }
+            String iniName = info.iniName == null ? "Game.ini" : info.iniName;
+            if (scripts != null && !scripts.isEmpty()) {
+                int v = rgssFromScriptsName(scripts);
+                if (v != 0) {
+                    fromScripts = v;
+                    scriptsText = iniName + " Scripts=" + printable(scripts);
+                }
+            }
+            if (library != null && !library.isEmpty()) {
+                int v = rgssFromLibraryName(library);
+                if (v != 0) {
+                    fromLibrary = v;
+                    libraryText = iniName + " Library=" + printable(library);
+                }
+            }
+        }
+
+        for (String f : info.dataFiles) {
+            int v = rgssFromScriptsFile(f);
+            if (v != 0) {
+                fromData = v;
+                dataText = "Data/" + f;
+                break;
+            }
+        }
+
+        for (String f : info.rootFiles) {
+            int v = rgssFromArchiveName(f);
+            if (v != 0) {
+                fromArchive = v;
+                archiveText = f;
+                break;
+            }
+        }
+
+        int rgss = 0;
+        String used = "";
+        if (fromJson != 0) { rgss = fromJson; used = jsonText; }
+        else if (fromScripts != 0) { rgss = fromScripts; used = scriptsText; }
+        else if (fromLibrary != 0) { rgss = fromLibrary; used = libraryText; }
+        else if (fromData != 0) { rgss = fromData; used = dataText; }
+        else if (fromArchive != 0) { rgss = fromArchive; used = archiveText; }
+
+        if (rgss == 0) {
+            return new Detection(0, "zip: no RGSS signal found (no mkxp.json rgssVersion, no Game.ini Scripts/Library,"
+                    + " no Data/Scripts.*, no archive)");
+        }
+
+        List<String> conflicts = new ArrayList<String>();
+        addConflict(conflicts, rgss, fromScripts, scriptsText);
+        addConflict(conflicts, rgss, fromLibrary, libraryText);
+        addConflict(conflicts, rgss, fromData, dataText);
+        addConflict(conflicts, rgss, fromArchive, archiveText);
+        if (fromJson != 0) addConflict(conflicts, rgss, fromJson, jsonText);
+
+        StringBuilder sb = new StringBuilder();
+        sb.append("zip: RGSS").append(rgss).append(" via ").append(used);
+        if (!conflicts.isEmpty()) {
+            sb.append(" [other signals disagree: ");
+            for (int i = 0; i < conflicts.size(); i++) {
+                if (i > 0) sb.append("; ");
+                sb.append(conflicts.get(i));
+            }
+            sb.append("]");
+        }
+        return new Detection(rgss, sb.toString());
+    }
+
+    /** "execName" from a mkxp.json text (comments already removed), or null. */
+    static String execNameFromJson(String strippedJson)
+    {
+        Matcher m = JSON_EXEC.matcher(strippedJson);
+        if (m.find() && !m.group(1).trim().isEmpty()) return m.group(1).trim();
+        return null;
+    }
+
+    /** Package-visible copy of stripJsonComments for ZipGameInfo. */
+    static String stripJsonCommentsForZip(String s)
+    {
+        return stripJsonComments(s);
+    }
+
     // --------------------------------------------------- name -> RGSS (testable)
 
     /** "Data\\Scripts.rxdata" -> 1, ".rvdata" -> 2, ".rvdata2" -> 3, anything else 0. */
@@ -289,13 +408,7 @@ final class RuntimeDetector
             byte[] buf = new byte[8192];
             int n;
             while ((n = in.read(buf)) > 0 && out.size() < MAX_TEXT_BYTES) out.write(buf, 0, n);
-            byte[] b = out.toByteArray();
-            Charset cs = StandardCharsets.ISO_8859_1; // keeps every ASCII byte intact
-            int off = 0;
-            if (b.length >= 2 && (b[0] & 0xff) == 0xFF && (b[1] & 0xff) == 0xFE) { cs = StandardCharsets.UTF_16LE; off = 2; }
-            else if (b.length >= 2 && (b[0] & 0xff) == 0xFE && (b[1] & 0xff) == 0xFF) { cs = StandardCharsets.UTF_16BE; off = 2; }
-            else if (b.length >= 3 && (b[0] & 0xff) == 0xEF && (b[1] & 0xff) == 0xBB && (b[2] & 0xff) == 0xBF) { off = 3; }
-            return new String(b, off, b.length - off, cs);
+            return decodeBytes(out.toByteArray());
         } catch (IOException e) {
             return "";
         } finally {
@@ -303,5 +416,17 @@ final class RuntimeDetector
                 try { in.close(); } catch (IOException ignored) { }
             }
         }
+    }
+
+    /** UTF-16 (BOM) / UTF-8 (BOM) / plain bytes (Latin-1, keeps every ASCII byte intact). */
+    static String decodeBytes(byte[] b)
+    {
+        if (b == null) return "";
+        Charset cs = StandardCharsets.ISO_8859_1;
+        int off = 0;
+        if (b.length >= 2 && (b[0] & 0xff) == 0xFF && (b[1] & 0xff) == 0xFE) { cs = StandardCharsets.UTF_16LE; off = 2; }
+        else if (b.length >= 2 && (b[0] & 0xff) == 0xFE && (b[1] & 0xff) == 0xFF) { cs = StandardCharsets.UTF_16BE; off = 2; }
+        else if (b.length >= 3 && (b[0] & 0xff) == 0xEF && (b[1] & 0xff) == 0xBB && (b[2] & 0xff) == 0xBF) { off = 3; }
+        return new String(b, off, b.length - off, cs);
     }
 }
