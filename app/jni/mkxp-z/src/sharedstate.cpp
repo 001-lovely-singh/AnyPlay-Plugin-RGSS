@@ -123,22 +123,40 @@ struct SharedStatePrivate
 		if (gl.ReleaseShaderCompiler)
 			gl.ReleaseShaderCompiler();
 
-		std::string archPath = config.execName + gameArchExt();
-
-		/* Check if a game archive exists */
-		FILE *tmp = fopen(archPath.c_str(), "rb");
-		if (tmp)
+		if (!config.zipPath.empty())
 		{
-			fileSystem.addPath(archPath.c_str());
-			fclose(tmp);
+			/* AnyPlay: the game is played straight from a .zip (nothing is extracted).
+			 * The current folder is the save folder. It is mounted FIRST, on the place
+			 * where the game's root folder is inside the zip, so a save written there
+			 * is found before anything in the zip and every path the game uses
+			 * ("Data/Scripts.rxdata", "Save1.rvdata2") works as in a normal folder.
+			 * The zip comes second and is mounted at the top. (An encrypted .rgssad
+			 * inside the zip is not supported; the launcher refuses such a zip.) */
+			fileSystem.setZipRoot(config.zipRoot.c_str());
+			fileSystem.addPath(".", fileSystem.zipMountPoint());
+			fileSystem.addPath(config.zipPath.c_str());
 		}
+		else
+		{
+			std::string archPath = config.execName + gameArchExt();
 
-		fileSystem.addPath(".");
+			/* Check if a game archive exists */
+			FILE *tmp = fopen(archPath.c_str(), "rb");
+			if (tmp)
+			{
+				fileSystem.addPath(archPath.c_str());
+				fclose(tmp);
+			}
+
+			fileSystem.addPath(".");
+		}
 
 		for (size_t i = 0; i < config.rtps.size(); ++i)
 			fileSystem.addPath(config.rtps[i].c_str());
 
-		if (config.pathCache)
+		/* A zip game always needs the path cache: it is what makes names with the
+		 * wrong upper/lower case work inside a (case sensitive) zip. */
+		if (config.pathCache || !config.zipPath.empty())
 			fileSystem.createPathCache();
 
 		fileSystem.initFontSets(fontState);
