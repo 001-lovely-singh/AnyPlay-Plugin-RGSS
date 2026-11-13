@@ -24,6 +24,7 @@
 
 #include <SDL_rwops.h>
 #include <string>
+#include <vector>
 
 #include "filesystemImpl.h"
 
@@ -78,6 +79,29 @@ public:
 	bool exists(const char *filename);
 
 	const char *desensitize(const char *filename);
+
+	/* ---- AnyPlay: game played straight from a .zip ------------------------
+	 * In this mode the zip is mounted at the root of the virtual file system
+	 * and the (writable) save folder is mounted on top of it at the same place
+	 * the game's own root folder has inside the zip. [root] = that folder
+	 * inside the zip: "" or "Folder/" (trailing slash).
+	 * Every path the game uses ("Graphics/x.png", "Data/Scripts.rxdata") is
+	 * then looked up under that folder, so a zip with a wrapper folder works
+	 * like a normal game folder. Without setZipRoot() nothing changes. */
+	void setZipRoot(const char *root);
+	bool zipMode() const;
+	/* Where to mount the save folder: the zip root ("Folder/"), or 0 for "". */
+	const char *zipMountPoint() const;
+
+	/* Questions about the merged tree (save folder + zip), used by the Ruby
+	 * File / Dir helpers in zip mode. Paths are game-relative ("Data/x.rxdata"),
+	 * lookups are case-insensitive like on Windows (when the path cache is on). */
+	/* 0 = does not exist, 1 = file, 2 = directory. [size] gets the file size. */
+	int virtualStat(const char *path, long long *size = 0);
+	/* Names directly inside [dir] ("" = game root). false if it is no directory. */
+	bool virtualList(const char *dir, std::vector<std::string> &out);
+	/* Whole file. false if it cannot be opened. */
+	bool virtualRead(const char *path, std::string &out);
 
 private:
 	FileSystemPrivate *p;
