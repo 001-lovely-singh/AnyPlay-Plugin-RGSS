@@ -7,13 +7,18 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.RandomAccessFile;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Comparator;
+import java.util.Enumeration;
+import java.util.List;
 import java.util.Locale;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.zip.DataFormatException;
 import java.util.zip.Inflater;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipFile;
 
 /**
  * Decides, for an RGSS1 (RPG Maker XP) game, whether it needs the legacy runtime (r18,
@@ -413,6 +418,186 @@ final class RuntimeProbe
         return v.matches("\\d[\\d.,\\s]*") ? v : null;
     }
 
+
+    // ------------------------------------------------------------ zip games
+
+    /**
+     * Same decision as probeRgss1(), for a game that is played straight from a .zip
+     * (see ZipGameInfo): Essentials version from Data/Scripts.rxdata inside the zip, else
+     * the ProductVersion of the game's .exe inside the zip. The exe is unpacked to a
+     * temporary file for a moment (only if it is at most 64 MB). Never null, never throws.
+     */
+    static Verdict probeRgss1Zip(ZipGameInfo info)
+    {
+        try {
+            return probeRgss1ZipInner(info);
+        } catch (Throwable t) {
+            return new Verdict(false, "probe failed (" + t.getClass().getSimpleName() + "), default clean");
+        }
+    }
+
+    private static Verdict probeRgss1ZipInner(ZipGameInfo info) throws IOException
+    {
+        if (info == null || info.zipFile == null) {
+            return new Verdict(false, "no zip to probe, default clean");
+        }
+        final String root = info.root;
+        final String scriptsLower = (root + "data/scripts.rxdata").toLowerCase(Locale.ROOT);
+
+        ZipFile zf = new ZipFile(info.zipFile);
+        try {
+            ZipEntry scriptsEntry = null;
+            List<ZipEntry> exes = new ArrayList<ZipEntry>();
+            final List<String> exeNames = new ArrayList<String>();
+            Enumeration<? extends ZipEntry> en = zf.entries();
+            while (en.hasMoreElements()) {
+                ZipEntry e = en.nextElement();
+                if (e.isDirectory()) continue;
+                String n = ZipGameInfo.normalise(e.getName());
+                if (n.toLowerCase(Locale.ROOT).equals(scriptsLower)) scriptsEntry = e;
+                if (n.regionMatches(true, 0, root, 0, root.length())) {
+                    String rest = n.substring(root.length());
+                    if (rest.indexOf('/') < 0 && rest.toLowerCase(Locale.ROOT).endsWith(".exe")) {
+                        exes.add(e);
+                        exeNames.add(rest);
+                    }
+                }
+            }
+
+            // 1. Essentials version inside the scripts
+            String essNote;
+            if (scriptsEntry == null) {
+                essNote = "no Data/Scripts.rxdata to scan";
+            } else if (scriptsEntry.getSize() <= 0) {
+                essNote = "Scripts.rxdata is empty";
+            } else if (scriptsEntry.getSize() > MAX_SCRIPTS_BYTES) {
+                essNote = "Scripts.rxdata too large to scan (" + (scriptsEntry.getSize() >> 20) + " MB)";
+            } else {
+                byte[] data = readEntry(zf, scriptsEntry, (int) scriptsEntry.getSize());
+                Essentials e = scanScriptsBytes(data);
+                if (e.major > 0) {
+                    if (e.major <= LAST_LEGACY_ESSENTIALS) {
+                        return new Verdict(true, "Essentials " + e.label + " in scripts (v" + LAST_LEGACY_ESSENTIALS
+                                + " and older = Ruby 1.8 era)");
+                    }
+                    return new Verdict(false, "Essentials " + e.label + " in scripts (v" + (LAST_LEGACY_ESSENTIALS + 1)
+                            + " and newer = modern Ruby)");
+                }
+                essNote = e.note;
+            }
+
+            // 2. exe ProductVersion (same order as findGameExecutable)
+            int pick = pickExe(exeNames, info.iniName);
+            if (pick < 0) {
+                return new Verdict(false, "no Essentials version (" + essNote + "), no .exe, default clean");
+            }
+            ZipEntry exeEntry = exes.get(pick);
+            String exeName = exeNames.get(pick);
+            if (exeEntry.getSize() <= 0 || exeEntry.getSize() > 64L * 1024L * 1024L) {
+                return new Verdict(false, "no Essentials version (" + essNote + "), " + printable(exeName)
+                        + " too large or empty to read, default clean");
+            }
+            String pv = null;
+            File tmp = File.createTempFile("rgss_exe", ".bin");
+            try {
+                java.io.FileOutputStream out = new java.io.FileOutputStream(tmp);
+                InputStream in = zf.getInputStream(exeEntry);
+                try {
+                    byte[] buf = new byte[64 * 1024];
+                    int n;
+                    while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+                } finally {
+                    try { in.close(); } catch (IOException ignored) { }
+                    out.close();
+                }
+                pv = readExeProductVersion(tmp);
+            } finally {
+                tmp.delete();
+            }
+            if (pv == null) {
+                return new Verdict(false, "no Essentials version (" + essNote + "), " + printable(exeName)
+                        + " has no readable ProductVersion, default clean");
+            }
+            if (isLegacyProductVersion(pv)) {
+                return new Verdict(true, printable(exeName) + " ProductVersion=" + printable(pv)
+                        + " (1.x = legacy), no Essentials version (" + essNote + ")");
+            }
+            return new Verdict(false, printable(exeName) + " ProductVersion=" + printable(pv)
+                    + " (not 1.x = clean), no Essentials version (" + essNote + ")");
+        } finally {
+            try { zf.close(); } catch (IOException ignored) { }
+        }
+    }
+
+    /** Index of the game's exe in [names]: "<ini base>.exe", then Game.exe, then first visible .exe. -1 = none. */
+    static int pickExe(List<String> names, String iniName)
+    {
+        Integer[] order = new Integer[names.size()];
+        for (int i = 0; i < order.length; i++) order[i] = i;
+        final List<String> nm = names;
+        Arrays.sort(order, new Comparator<Integer>() {
+            @Override public int compare(Integer a, Integer b) {
+                return nm.get(a).compareToIgnoreCase(nm.get(b));
+            }
+        });
+        if (iniName != null && iniName.toLowerCase(Locale.ROOT).endsWith(".ini")) {
+            String want = iniName.substring(0, iniName.length() - 4) + ".exe";
+            for (int i : order) if (names.get(i).equalsIgnoreCase(want)) return i;
+        }
+        for (int i : order) if (names.get(i).equalsIgnoreCase("Game.exe")) return i;
+        for (int i : order) if (!names.get(i).startsWith(".")) return i;
+        return -1;
+    }
+
+    private static byte[] readEntry(ZipFile zf, ZipEntry e, int expected) throws IOException
+    {
+        InputStream in = zf.getInputStream(e);
+        try {
+            byte[] data = new byte[expected];
+            int off = 0;
+            while (off < expected) {
+                int n = in.read(data, off, expected - off);
+                if (n < 0) break;
+                off += n;
+            }
+            return off == expected ? data : Arrays.copyOf(data, off);
+        } finally {
+            try { in.close(); } catch (IOException ignored) { }
+        }
+    }
+
+    /** describeFolder() for a zip game: what is inside the zip (for AnyPlayLog's header). Never throws. */
+    static String describeZip(ZipGameInfo info)
+    {
+        try {
+            if (info == null) return "folder facts: zip missing";
+            StringBuilder top = new StringBuilder();
+            int shown = 0;
+            for (String n : info.rootFiles) {
+                if (shown >= 30) break;
+                if (top.length() > 0) top.append(',');
+                top.append(printable(n));
+                shown++;
+            }
+            int maps = 0;
+            boolean scripts = false;
+            for (String n : info.dataFiles) {
+                String l = n.toLowerCase(Locale.ROOT);
+                if (l.startsWith("scripts.")) scripts = true;
+                if (l.matches("map\\d+\\.(rxdata|rvdata2?)")) maps++;
+            }
+            StringBuilder sb = new StringBuilder("folder facts: PLAYED FROM ZIP ")
+                    .append(printable(info.zipFile == null ? "?" : info.zipFile.getName()))
+                    .append(", root=\"").append(printable(info.root)).append("\"; ")
+                    .append(info.rootFiles.size()).append(" files in root [").append(top);
+            if (info.rootFiles.size() > shown) sb.append(",...");
+            sb.append("]; Data/ has ").append(info.dataFiles.size()).append(" files, ").append(maps)
+              .append(" Map*, Scripts.*=").append(scripts ? "yes" : "no");
+            return sb.toString();
+        } catch (Throwable t) {
+            return "folder facts unavailable (" + t.getClass().getSimpleName() + ")";
+        }
+    }
 
     // ------------------------------------------------------- folder facts (log)
 
