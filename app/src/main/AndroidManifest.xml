@@ -49,6 +49,11 @@
         android:allowBackup="true"
         android:requestLegacyExternalStorage="true"
     >
+        <!-- AnyPlay: tells the AnyPlay app that this plugin can play a game straight from a zip
+             (extras game_zip / game_zip_root / save_dir). AnyPlay reads this flag; an older
+             plugin without it gets the "unzip first" flow instead. -->
+        <meta-data android:name="anyplay_zip_launch" android:value="true" />
+
         <!-- Main activity -->
         <activity
             android:name=".MainActivity"
@@ -71,7 +76,8 @@
             </intent-filter>
 
             <!-- AnyPlay: lets the AnyPlay app start a game by folder path.
-                 Intent action com.anyplay.rgss.LAUNCH + string extra "game_dir". -->
+                 Intent action com.anyplay.rgss.LAUNCH + string extra "game_dir".
+                 Or straight from a zip: string extras "game_zip", "game_zip_root", "save_dir". -->
             <intent-filter>
                 <action android:name="com.anyplay.rgss.LAUNCH" />
                 <category android:name="android.intent.category.DEFAULT" />
