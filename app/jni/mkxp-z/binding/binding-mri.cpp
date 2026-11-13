@@ -80,6 +80,9 @@ extern const char module_rpg1[];
 extern const char module_rpg2[];
 extern const char module_rpg3[];
 
+/* AnyPlay: Ruby File/Dir access to a game played straight from a .zip */
+#include "anyplay-zipfs.h"
+
 static void mriBindingExecute();
 static void mriBindingTerminate();
 static void mriBindingReset();
@@ -246,6 +249,7 @@ static void mriBindingInit()
 	_rb_define_module_function(mod, "show_settings", mkxpSettingsMenu);
 	_rb_define_module_function(mod, "puts", mkxpPuts);
 	_rb_define_module_function(mod, "desensitize", mkxpDesensitize);
+	anyplayZipfsBind(mod);
 
 	_rb_define_module_function(mod, "platform", mkxpPlatform);
 	_rb_define_module_function(mod, "is_windows?", mkxpIsWindowsHost);
@@ -1311,6 +1315,15 @@ Bignum = Integer unless defined?(Bignum)
         if (reqState)
             rb_set_errinfo(Qnil);
 
+        // AnyPlay: zip game: Ruby's File / Dir / IO also see the zip. Must run BEFORE the
+        // prelude below, whose AnyPlayFastFiles wrappers capture File.exist? and friends.
+        {
+            int zipState = 0;
+            rb_eval_string_protect(ANYPLAY_ZIPFS_RB, &zipState);
+            if (zipState)
+                rb_set_errinfo(Qnil);
+        }
+
         // AnyPlay: safe dispose, full-screen fit, tap-to-walk (see anyplay_prelude.rb)
         {
             int preState = 0;
@@ -1663,7 +1676,7 @@ end
 # catches itself - those are marked), (3) the final error that stopped the game
 # with the full call chain, and (4) a few notes (touch / slow frames) for context.
 module AnyPlayLog
-  VERSION   = "0.1.41"
+  VERSION   = "0.1.42"
   FILE      = "AnyPlayLog.txt"
   MAX_BYTES = 250_000
   CAPS      = { error: 200, note: 400 }
