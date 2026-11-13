@@ -22,6 +22,8 @@ import android.widget.Toast;
 import java.util.Locale;
 import java.util.Arrays;
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
 
 import org.libsdl.app.SDL;
 import org.libsdl.app.SDLActivity;
@@ -49,6 +51,25 @@ public class MainActivity extends SDLActivity
     private static final String EXTRA_GAME_DIR = "game_dir";
     private static final String EXTRA_RUNTIME_MODE = "runtime_mode";
     private boolean mCustomGameDir = false;
+
+    // ---- AnyPlay: play straight from a .zip (nothing is extracted) -----------------
+    // AnyPlay starts this activity with the SAME action and these extras instead of
+    // "game_dir":
+    //   game_zip       absolute path of the .zip
+    //   game_zip_root  folder INSIDE the zip that holds Game.ini / Data ("" = top level;
+    //                  when the extra is missing the plugin looks for it itself)
+    //   save_dir       writable folder for saves (AnyPlay/Saves/<zipName>/)
+    // The game's files are mounted from the zip by the engine (PhysFS). The save folder
+    // becomes the working folder of the process, so save_data / File.open("Save1...")
+    // / AnyPlayLog.txt all land there and the zip itself is never touched.
+    // The native side learns about all this from environment variables (see
+    // applyGameZipFromIntent), the same way it already learns the runtime reason.
+    private static final String EXTRA_GAME_ZIP = "game_zip";
+    private static final String EXTRA_GAME_ZIP_ROOT = "game_zip_root";
+    private static final String EXTRA_SAVE_DIR = "save_dir";
+    private static String sGameZip = null;           // zip being played, null = folder game
+    private static ZipGameInfo sZipInfo = null;      // what was read from that zip
+    private String mLaunchError = null;              // set when the launch cannot continue
 
     // Runtime ids. A runtime = one libruby + one engine library, loaded together.
     // One process = one runtime: Ruby cannot be initialised twice in a process,
@@ -137,6 +158,154 @@ public class MainActivity extends SDLActivity
         }
     }
 
+    // ---------------------------------------------------------------- zip games
+
+    /**
+     * Handles "game_zip" / "game_zip_root" / "save_dir". Returns true when the intent is a
+     * zip launch (even a failed one: mLaunchError is then set and the activity closes),
+     * false when it is not, so the caller falls back to "game_dir".
+     *
+     * Effects of a good zip launch:
+     *   - GAME_PATH = the save folder. The native code makes GAME_PATH the working folder,
+     *     so everything a game writes with plain Ruby file calls lands there.
+     *   - Environment variables for the native side:
+     *       ANYPLAY_GAME_ZIP        absolute path of the zip
+     *       ANYPLAY_GAME_ZIP_ROOT   "" or "Folder/" inside the zip
+     *       ANYPLAY_ZIP_INI         copy of the game's Game.ini ("" if none)
+     *       ANYPLAY_ZIP_MKXP_JSON   copy of the game's mkxp.json ("" if none)
+     *     The two copies live in the plugin's cache folder: the engine reads its settings
+     *     before its file system exists, so it cannot read them out of the zip itself.
+     */
+    private boolean applyGameZipFromIntent(Intent intent)
+    {
+        sGameZip = null;
+        sZipInfo = null;
+        setNativeEnv("ANYPLAY_GAME_ZIP", null);
+        setNativeEnv("ANYPLAY_GAME_ZIP_ROOT", null);
+        setNativeEnv("ANYPLAY_ZIP_INI", null);
+        setNativeEnv("ANYPLAY_ZIP_MKXP_JSON", null);
+
+        if (intent == null) return false;
+        String zip = intent.getStringExtra(EXTRA_GAME_ZIP);
+        if (zip == null || zip.isEmpty()) return false;
+
+        File zipFile = new File(zip);
+        if (!zipFile.isFile()) {
+            mLaunchError = "Zip file not found: " + zipFile.getName();
+            return true;
+        }
+
+        File saveDir = pickSaveDir(this, zipFile, intent.getStringExtra(EXTRA_SAVE_DIR));
+        if (saveDir == null) {
+            mLaunchError = "No writable folder for saves of " + zipFile.getName();
+            return true;
+        }
+
+        ZipGameInfo info;
+        try {
+            info = ZipGameInfo.read(zipFile, intent.getStringExtra(EXTRA_GAME_ZIP_ROOT));
+        } catch (Exception e) {
+            Log.e(TAG, "Could not read zip " + zip, e);
+            mLaunchError = "Could not read " + zipFile.getName() + ": " + e.getMessage();
+            return true;
+        }
+        if (info.problem != null) {
+            mLaunchError = zipFile.getName() + " cannot be played from the zip: " + info.problem;
+            return true;
+        }
+
+        // Copies of the two small config files (see the method comment).
+        String iniPath = "";
+        String jsonPath = "";
+        try {
+            File cfg = new File(getCacheDir(), "anyplay_zipcfg");
+            cfg.mkdirs();
+            File ini = new File(cfg, "Game.ini");
+            File json = new File(cfg, "mkxp.json");
+            if (info.iniBytes != null) {
+                writeBytes(ini, info.iniBytes);
+                iniPath = ini.getAbsolutePath();
+            } else {
+                ini.delete();
+            }
+            if (info.jsonBytes != null) {
+                writeBytes(json, info.jsonBytes);
+                jsonPath = json.getAbsolutePath();
+            } else {
+                json.delete();
+            }
+        } catch (IOException e) {
+            Log.e(TAG, "Could not write the config copies", e);
+            mLaunchError = "Could not prepare " + zipFile.getName() + ": " + e.getMessage();
+            return true;
+        }
+
+        setNativeEnv("ANYPLAY_GAME_ZIP", zipFile.getAbsolutePath());
+        setNativeEnv("ANYPLAY_GAME_ZIP_ROOT", info.root);
+        setNativeEnv("ANYPLAY_ZIP_INI", iniPath);
+        setNativeEnv("ANYPLAY_ZIP_MKXP_JSON", jsonPath);
+
+        GAME_PATH = saveDir.getAbsolutePath();
+        mCustomGameDir = true;
+        sGameZip = zipFile.getAbsolutePath();
+        sZipInfo = info;
+        Log.i(TAG, "Zip game from AnyPlay: " + sGameZip + " root=\"" + info.root + "\" saves=" + GAME_PATH);
+        return true;
+    }
+
+    /**
+     * Picks the folder for the saves of a zip game: the one AnyPlay asked for, or, when
+     * that cannot be written to, a folder in the plugin's own storage. Returns null only
+     * when nothing works. A real write test is used because File.canWrite() is not
+     * reliable on shared storage.
+     */
+    private static File pickSaveDir(Context ctx, File zip, String requested)
+    {
+        File[] candidates = new File[2];
+        if (requested != null && !requested.isEmpty()) candidates[0] = new File(requested);
+
+        File base = ctx.getExternalFilesDir(null);
+        if (base == null) base = ctx.getFilesDir();
+        String safe = zip.getName().replaceAll("[^A-Za-z0-9._-]", "_");
+        candidates[1] = new File(base, "saves/" + safe);
+
+        for (File dir : candidates) {
+            if (dir == null) continue;
+            if (!dir.isDirectory() && !dir.mkdirs() && !dir.isDirectory()) continue;
+            File probe = new File(dir, ".anyplay_write_test");
+            try {
+                FileOutputStream out = new FileOutputStream(probe);
+                out.close();
+                probe.delete();
+                return dir;
+            } catch (IOException e) {
+                Log.w(TAG, "Save folder not writable: " + dir + " (" + e.getMessage() + ")");
+            }
+        }
+        return null;
+    }
+
+    private static void writeBytes(File f, byte[] data) throws IOException
+    {
+        FileOutputStream out = new FileOutputStream(f);
+        try {
+            out.write(data);
+        } finally {
+            out.close();
+        }
+    }
+
+    /** Sets (value != null) or removes an environment variable of this process. */
+    private static void setNativeEnv(String name, String value)
+    {
+        try {
+            if (value == null) android.system.Os.unsetenv(name);
+            else android.system.Os.setenv(name, value, true);
+        } catch (Exception e) {
+            Log.w(TAG, "Could not set " + name + ": " + e);
+        }
+    }
+
     /**
      * Reads "game_dir" from the launching intent and, if valid, makes it the
      * game folder. The native side reads the static GAME_PATH field when the SDL
@@ -221,9 +390,9 @@ public class MainActivity extends SDLActivity
      *   4. nothing identifiable -> MODERN_AUTO_RUNTIME (the safe default)
      * Used both at start-up and by onNewIntent, so both always agree.
      */
-    private static RuntimeChoice resolveRuntime(String requestedMode, String gameDir)
+    private static RuntimeChoice resolveRuntime(String requestedMode, String gameDir, ZipGameInfo zip)
     {
-        RuntimeChoice c = resolveRuntimeRaw(requestedMode, gameDir);
+        RuntimeChoice c = resolveRuntimeRaw(requestedMode, gameDir, zip);
         if (!isRuntimeInstalled(c.id)) {
             return new RuntimeChoice(RT_R3, "wanted " + c.id + " (" + c.reason + ") but this APK does not contain it,"
                     + " using r3");
@@ -243,7 +412,7 @@ public class MainActivity extends SDLActivity
         return true;
     }
 
-    private static RuntimeChoice resolveRuntimeRaw(String requestedMode, String gameDir)
+    private static RuntimeChoice resolveRuntimeRaw(String requestedMode, String gameDir, ZipGameInfo zip)
     {
         String warn = "";
 
@@ -269,10 +438,11 @@ public class MainActivity extends SDLActivity
         }
 
         // 3. auto-detect
-        RuntimeDetector.Detection d = RuntimeDetector.detect(dir);
+        // (zip game: from the zip's own file list; the save folder `dir` has no game files)
+        RuntimeDetector.Detection d = (zip != null) ? RuntimeDetector.detectZip(zip) : RuntimeDetector.detect(dir);
         if (d.rgss == 1) {
             // RPG Maker XP format. Old (Ruby 1.8) and modern (Ruby 3) games share it, so look closer.
-            RuntimeProbe.Verdict v = RuntimeProbe.probeRgss1(dir);
+            RuntimeProbe.Verdict v = (zip != null) ? RuntimeProbe.probeRgss1Zip(zip) : RuntimeProbe.probeRgss1(dir);
             return new RuntimeChoice(v.legacy ? RT_R18 : MODERN_AUTO_RUNTIME,
                     "auto: " + d.reason + "; " + v.reason + warn);
         }
@@ -290,12 +460,14 @@ public class MainActivity extends SDLActivity
     private void selectRubyRuntime(Intent intent)
     {
         String requested = intent == null ? null : intent.getStringExtra(EXTRA_RUNTIME_MODE);
-        RuntimeChoice c = resolveRuntime(requested, GAME_PATH);
+        RuntimeChoice c = resolveRuntime(requested, GAME_PATH, sZipInfo);
         sRuntimeId = c.id;
         sRuntimeReason = c.reason;
         Log.i(TAG, "Runtime " + c.id + " chosen: " + c.reason);
         // Facts about the game folder go into the same log header line (AnyPlayLog prints it).
-        String facts = RuntimeProbe.describeFolder(GAME_PATH == null ? null : new File(GAME_PATH));
+        String facts = (sZipInfo != null)
+                ? RuntimeProbe.describeZip(sZipInfo)
+                : RuntimeProbe.describeFolder(GAME_PATH == null ? null : new File(GAME_PATH));
         Log.i(TAG, facts);
         try {
             android.system.Os.setenv("ANYPLAY_RUNTIME_REASON", c.reason + " | " + facts, true);
@@ -364,18 +536,42 @@ public class MainActivity extends SDLActivity
         super.onNewIntent(intent);
 
         sNativeLibDir = getApplicationInfo().nativeLibraryDir;
+        String zip = intent.getStringExtra(EXTRA_GAME_ZIP);
+        boolean zipLaunch = zip != null && !zip.isEmpty();
         String dir = intent.getStringExtra(EXTRA_GAME_DIR);
         String mode = intent.getStringExtra(EXTRA_RUNTIME_MODE);
-        boolean anyplayLaunch = (dir != null && !dir.isEmpty()) || (mode != null && !mode.isEmpty());
+        boolean anyplayLaunch = zipLaunch || (dir != null && !dir.isEmpty()) || (mode != null && !mode.isEmpty());
 
-        boolean otherGame = dir != null && !dir.isEmpty()
-                && !new File(dir).getAbsolutePath().equals(GAME_PATH);
+        boolean otherGame;
+        String wantedDir;
+        ZipGameInfo wantedZip = null;
+        if (zipLaunch) {
+            // A zip game is "the same game" only when it is the same zip file.
+            String running = sGameZip == null ? null : new File(sGameZip).getAbsolutePath();
+            otherGame = running == null || !new File(zip).getAbsolutePath().equals(running);
+            if (!otherGame) {
+                wantedZip = sZipInfo;
+                wantedDir = GAME_PATH;
+            } else {
+                File save = pickSaveDir(this, new File(zip), intent.getStringExtra(EXTRA_SAVE_DIR));
+                wantedDir = save == null ? GAME_PATH : save.getAbsolutePath();
+                try {
+                    wantedZip = ZipGameInfo.read(new File(zip), intent.getStringExtra(EXTRA_GAME_ZIP_ROOT));
+                } catch (Exception e) {
+                    Log.w(TAG, "onNewIntent: could not read zip " + zip + ": " + e);
+                }
+            }
+        } else {
+            otherGame = dir != null && !dir.isEmpty()
+                    && !new File(dir).getAbsolutePath().equals(GAME_PATH);
+            wantedDir = (dir != null && !dir.isEmpty()) ? dir : GAME_PATH;
+            if (!otherGame) wantedZip = sZipInfo;   // e.g. a USB intent while a zip game runs
+        }
 
-        // Same rules as selectRubyRuntime() (resolveRuntime), applied to the game folder
-        // of the NEW launch. Only checked for a real AnyPlay launch, so e.g. a USB-attach
+        // Same rules as selectRubyRuntime() (resolveRuntime), applied to the game of the
+        // NEW launch. Only checked for a real AnyPlay launch, so e.g. a USB-attach
         // intent never closes a running game.
-        String wantedDir = (dir != null && !dir.isEmpty()) ? dir : GAME_PATH;
-        String wanted = anyplayLaunch ? resolveRuntime(mode, wantedDir).id : sRuntimeId;
+        String wanted = anyplayLaunch ? resolveRuntime(mode, wantedDir, wantedZip).id : sRuntimeId;
         boolean otherRuntime = anyplayLaunch && !wanted.equals(sRuntimeId);
 
         if (otherGame || otherRuntime) {
@@ -390,11 +586,23 @@ public class MainActivity extends SDLActivity
     protected void onCreate(Bundle savedInstanceState)
     {
         // Must be before super.onCreate(): picks the game folder before SDL starts.
-        applyGameDirFromIntent(getIntent());
+        if (!applyGameZipFromIntent(getIntent())) {
+            applyGameDirFromIntent(getIntent());
+        }
         sNativeLibDir = getApplicationInfo().nativeLibraryDir;
-        selectRubyRuntime(getIntent());
+        if (mLaunchError == null) {
+            selectRubyRuntime(getIntent());
+        }
 
         super.onCreate(savedInstanceState);
+
+        if (mLaunchError != null) {
+            // The zip cannot be played directly (missing, encrypted archive inside, ...).
+            Log.e(TAG, "Launch aborted: " + mLaunchError);
+            Toast.makeText(this, mLaunchError, Toast.LENGTH_LONG).show();
+            finish();
+            return;
+        }
 
         mStorageManager = (StorageManager) getSystemService(STORAGE_SERVICE);
 
