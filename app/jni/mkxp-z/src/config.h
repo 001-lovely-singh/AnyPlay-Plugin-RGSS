@@ -67,6 +67,14 @@ struct Config {
     std::string gameFolder;
     bool manualFolderSelect;
     
+    /* AnyPlay: game played straight from a .zip (nothing extracted).
+     * Both come from environment variables the Android launcher sets
+     * (ANYPLAY_GAME_ZIP / ANYPLAY_GAME_ZIP_ROOT); empty zipPath = normal folder game.
+     * zipRoot is the folder INSIDE the zip that holds Game.ini / Data ("" or "Folder/").
+     * In this mode the current folder is the (writable) save folder. */
+    std::string zipPath;
+    std::string zipRoot;
+    
     bool anyAltToggleFS;
     bool enableReset;
     bool enableSettings;
