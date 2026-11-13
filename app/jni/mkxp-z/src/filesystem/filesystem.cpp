@@ -303,6 +303,15 @@ struct FileSystemPrivate {
   /* This is for compatibility with games that take Windows'
    * case insensitivity for granted */
   bool havePathCache;
+
+  /* AnyPlay zip mode (see FileSystem::setZipRoot). pathCache/dirCache then map
+   * the lower case path RELATIVE to the game root to the REAL path inside the
+   * virtual tree (zipRoot + mixed case path), so the game can keep using
+   * "Graphics/x.png" whatever folder the zip wraps it in. */
+  bool zipMode;
+  std::string zipRoot; /* "" or "Folder/" */
+  /* Maps: lower case directory path (relative), To: real directory path */
+  BoostHash<std::string, std::string> dirCache;
 };
 
 static void throwPhysfsError(const char *desc) {
@@ -343,6 +352,7 @@ FileSystem::FileSystem(const char *argv0, bool allowSymlinks)
 
 	p = new FileSystemPrivate;
 	p->havePathCache = false;
+	p->zipMode = false;
 
 	if (allowSymlinks)
 		PHYSFS_permitSymbolicLinks(1);
@@ -391,6 +401,70 @@ void FileSystem::removePath(const char *path, bool reload) {
     if (reload) reloadPathCache();
 }
 
+/* ---- AnyPlay: zip mode helpers ------------------------------------------ */
+
+void FileSystem::setZipRoot(const char *root) {
+  std::string r(root ? root : "");
+
+  for (size_t i = 0; i < r.size(); ++i)
+    if (r[i] == '\\')
+      r[i] = '/';
+
+  while (!r.empty() && r[0] == '/')
+    r.erase(0, 1);
+
+  if (!r.empty() && r[r.size() - 1] != '/')
+    r += '/';
+
+  p->zipRoot = r;
+  p->zipMode = true;
+}
+
+bool FileSystem::zipMode() const { return p->zipMode; }
+
+const char *FileSystem::zipMountPoint() const {
+  return (p->zipMode && !p->zipRoot.empty()) ? p->zipRoot.c_str() : 0;
+}
+
+/* The zip root without its trailing slash ("" for the top level). */
+static std::string zipRootDir(const FileSystemPrivate *p) {
+  std::string r = p->zipMode ? p->zipRoot : std::string();
+
+  while (!r.empty() && r[r.size() - 1] == '/')
+    r.erase(r.size() - 1);
+
+  return r;
+}
+
+/* Game-relative path ("Graphics/x.png", already normalize()d) to the real path
+ * inside the virtual tree. Uses the path cache first, so the game's
+ * Windows-style wrong-case names still resolve. */
+static std::string zipResolve(FileSystemPrivate *p, const std::string &norm) {
+  std::string s = norm;
+
+  while (s.compare(0, 2, "./") == 0)
+    s.erase(0, 2);
+
+  while (!s.empty() && s[0] == '/')
+    s.erase(0, 1);
+
+  if (s == ".")
+    s.clear();
+
+  if (p->havePathCache && !s.empty()) {
+    std::string low = s;
+    strTolower(low);
+
+    if (p->pathCache.contains(low))
+      return p->pathCache[low];
+
+    if (p->dirCache.contains(low))
+      return p->dirCache[low];
+  }
+
+  return p->zipRoot + s;
+}
+
 struct CacheEnumData {
   FileSystemPrivate *p;
   std::stack<std::vector<std::string> *> fileLists;
@@ -399,6 +473,10 @@ struct CacheEnumData {
   iconv_t nfd2nfc;
   char buf[512];
 #endif
+
+  /* AnyPlay zip mode: length of the zip root prefix that is not part of the
+   * path the game uses (0 = normal folder game) */
+  size_t strip = 0;
 
   CacheEnumData(FileSystemPrivate *p) : p(p) {
 #ifdef __APPLE__
@@ -446,8 +524,14 @@ static PHYSFS_EnumerateCallbackResult cacheEnumCB(void *d, const char *origdir,
   /* Deal with OSX' weird UTF-8 standards */
   data.toNFC(fullPath);
 
+  /* mixedCase = the REAL path (what PhysFS needs). logical = the path as the
+   * game sees it (the same thing, minus the zip root in zip mode). The cache
+   * is keyed by the lower case logical path. */
   std::string mixedCase(fullPath);
-  std::string lowerCase = mixedCase;
+  std::string logical = mixedCase;
+  if (data.strip > 0 && logical.size() >= data.strip)
+    logical = logical.substr(data.strip);
+  std::string lowerCase = logical;
   strTolower(lowerCase);
 
   /* AnyPlay: asking the storage for the type of every one of the thousands of game files
@@ -478,6 +562,9 @@ static PHYSFS_EnumerateCallbackResult cacheEnumCB(void *d, const char *origdir,
     /* Create a new list for this directory */
     std::vector<std::string> &list = data.p->fileLists[lowerCase];
 
+    if (data.p->zipMode)
+      data.p->dirCache.insert(lowerCase, mixedCase);
+
     /* Iterate over its contents */
     data.fileLists.push(&list);
     PHYSFS_enumerate(fullPath, cacheEnumCB, d);
@@ -502,7 +589,11 @@ void FileSystem::createPathCache() {
   Uint32 t0 = SDL_GetTicks();
   CacheEnumData data(p);
   data.fileLists.push(&p->fileLists[""]);
-  PHYSFS_enumerate("", cacheEnumCB, &data);
+
+  /* Zip mode: index only what is below the game's root folder in the zip */
+  std::string startDir = zipRootDir(p);
+  data.strip = p->zipMode ? p->zipRoot.size() : 0;
+  PHYSFS_enumerate(startDir.c_str(), cacheEnumCB, &data);
 
   p->havePathCache = true;
   Debug() << "AnyPlay: file index built in" << (int)(SDL_GetTicks() - t0) << "ms";
@@ -513,6 +604,7 @@ void FileSystem::reloadPathCache() {
     
     p->fileLists.clear();
     p->pathCache.clear();
+    p->dirCache.clear();
     createPathCache();
 }
 
@@ -552,7 +644,14 @@ static PHYSFS_EnumerateCallbackResult fontSetEnumCB(void *data, const char *dir,
   SDL_RWops ops;
   initReadOps(handle, ops, false);
 
-  d->sfs->initFontSetCB(ops, filename);
+  /* Zip mode: the font is remembered under the path the game uses, without the
+   * zip root (openReadRaw adds it again). */
+  const char *logical = filename;
+  if (d->p->zipMode && d->p->zipRoot.size() > 0 &&
+      strncmp(filename, d->p->zipRoot.c_str(), d->p->zipRoot.size()) == 0)
+    logical = filename + d->p->zipRoot.size();
+
+  d->sfs->initFontSetCB(ops, logical);
 
   SDL_RWclose(&ops);
 
@@ -562,18 +661,26 @@ static PHYSFS_EnumerateCallbackResult fontSetEnumCB(void *data, const char *dir,
 /* Basically just a case-insensitive search
  * for the folder "Fonts"... */
 static PHYSFS_EnumerateCallbackResult
-findFontsFolderCB(void *data, const char *, const char *fname) {
+findFontsFolderCB(void *data, const char *origdir, const char *fname) {
   size_t i = 0;
   char buffer[512];
   const char *s = fname;
 
-  while (*s && i < sizeof(buffer))
+  while (*s && i < sizeof(buffer) - 1)
     buffer[i++] = tolower(*s++);
 
   buffer[i] = '\0';
 
-  if (strcmp(buffer, "fonts") == 0)
-    PHYSFS_enumerate(fname, fontSetEnumCB, data);
+  if (strcmp(buffer, "fonts") == 0) {
+    /* Zip mode enumerates from the zip root, so the folder path starts there */
+    char path[512];
+    if (origdir && *origdir)
+      snprintf(path, sizeof(path), "%s/%s", origdir, fname);
+    else
+      snprintf(path, sizeof(path), "%s", fname);
+
+    PHYSFS_enumerate(path, fontSetEnumCB, data);
+  }
 
   return PHYSFS_ENUM_OK;
 }
@@ -581,7 +688,8 @@ findFontsFolderCB(void *data, const char *, const char *fname) {
 void FileSystem::initFontSets(SharedFontState &sfs) {
   FontSetsCBData d = {p, &sfs};
 
-  PHYSFS_enumerate("", findFontsFolderCB, &d);
+  std::string startDir = zipRootDir(p);
+  PHYSFS_enumerate(startDir.c_str(), findFontsFolderCB, &d);
 }
 
 struct OpenReadEnumData {
@@ -704,7 +812,15 @@ void FileSystem::openRead(OpenHandler &handler, const char *filename) {
     for (size_t i = 0; i < fileList.size(); ++i)
       openReadEnumCB(&data, dir, fileList[i].c_str());
   } else {
-    PHYSFS_enumerate(dir, openReadEnumCB, &data);
+    if (p->zipMode) {
+      /* the folder lives below the zip root in the virtual tree */
+      std::string realDir = p->zipRoot + dir;
+      while (!realDir.empty() && realDir[realDir.size() - 1] == '/')
+        realDir.erase(realDir.size() - 1);
+      PHYSFS_enumerate(realDir.c_str(), openReadEnumCB, &data);
+    } else {
+      PHYSFS_enumerate(dir, openReadEnumCB, &data);
+    }
   }
 
   if (data.physfsError)
@@ -718,13 +834,18 @@ void FileSystem::openReadRaw(SDL_RWops &ops, const char *filename,
                              bool freeOnClose) {
 
   std::string path = normalize(filename, 0, 0);
+
+  /* AnyPlay zip mode: the file is looked up below the zip root, case-insensitive */
+  if (p->zipMode)
+    path = zipResolve(p, path);
+
   PHYSFS_File *handle = PHYSFS_openRead(path.c_str());
 
   /* AnyPlay: Windows does not care about upper/lower case in file names, but RGSS
    * archives (and some Android folders) do. A game can ask for "Data/Map003.rxdata"
    * while the archive stores "Data/map003.rxdata". If the exact name is not found,
    * look it up ignoring case in the file index and open that spelling instead. */
-  if (!handle && p->havePathCache) {
+  if (!handle && !p->zipMode && p->havePathCache) {
     std::string lower(path);
     std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c){
       return std::tolower(c);
@@ -749,7 +870,12 @@ std::string FileSystem::normalize(const char *pathname, bool preferred,
 }
 
 bool FileSystem::exists(const char *filename) {
-  return PHYSFS_exists(normalize(filename, false, false).c_str());
+  std::string fn = normalize(filename, false, false);
+
+  if (p->zipMode)
+    fn = zipResolve(p, fn);
+
+  return PHYSFS_exists(fn.c_str());
 }
 
 const char *FileSystem::desensitize(const char *filename) {
@@ -758,7 +884,103 @@ const char *FileSystem::desensitize(const char *filename) {
   std::transform(fn_lower.begin(), fn_lower.end(), fn_lower.begin(), [](unsigned char c){
       return std::tolower(c);
   });
-  if (p->havePathCache && p->pathCache.contains(fn_lower))
-    return p->pathCache[fn_lower].c_str();
+  if (p->havePathCache && p->pathCache.contains(fn_lower)) {
+    const std::string &real = p->pathCache[fn_lower];
+    /* zip mode: hand back the path the game uses, without the zip root */
+    size_t strip = p->zipMode ? p->zipRoot.size() : 0;
+    return real.c_str() + (real.size() >= strip ? strip : 0);
+  }
   return filename;
+}
+
+/* ---- AnyPlay: questions about the merged tree (zip mode) ------------------ */
+
+int FileSystem::virtualStat(const char *path, long long *size) {
+  std::string fn = normalize(path, false, false);
+
+  if (p->zipMode)
+    fn = zipResolve(p, fn);
+
+  while (!fn.empty() && fn[fn.size() - 1] == '/')
+    fn.erase(fn.size() - 1);
+
+  /* the root itself */
+  if (fn.empty())
+    return 2;
+
+  PHYSFS_Stat st;
+
+  if (!PHYSFS_stat(fn.c_str(), &st))
+    return 0;
+
+  if (st.filetype == PHYSFS_FILETYPE_DIRECTORY)
+    return 2;
+
+  if (st.filetype != PHYSFS_FILETYPE_REGULAR)
+    return 0;
+
+  if (size)
+    *size = (long long)st.filesize;
+
+  return 1;
+}
+
+static PHYSFS_EnumerateCallbackResult listEnumCB(void *d, const char *,
+                                                 const char *fname) {
+  static_cast<std::vector<std::string> *>(d)->push_back(fname);
+  return PHYSFS_ENUM_OK;
+}
+
+bool FileSystem::virtualList(const char *dir, std::vector<std::string> &out) {
+  std::string fn = normalize(dir, false, false);
+
+  if (p->zipMode)
+    fn = zipResolve(p, fn);
+
+  while (!fn.empty() && fn[fn.size() - 1] == '/')
+    fn.erase(fn.size() - 1);
+
+  if (!fn.empty()) {
+    PHYSFS_Stat st;
+
+    if (!PHYSFS_stat(fn.c_str(), &st) ||
+        st.filetype != PHYSFS_FILETYPE_DIRECTORY)
+      return false;
+  }
+
+  return PHYSFS_enumerate(fn.c_str(), listEnumCB, &out) != 0;
+}
+
+bool FileSystem::virtualRead(const char *path, std::string &out) {
+  std::string fn = normalize(path, false, false);
+
+  if (p->zipMode)
+    fn = zipResolve(p, fn);
+
+  PHYSFS_File *f = PHYSFS_openRead(fn.c_str());
+
+  if (!f)
+    return false;
+
+  PHYSFS_sint64 len = PHYSFS_fileLength(f);
+  out.clear();
+
+  if (len > 0) {
+    out.resize((size_t)len);
+    size_t done = 0;
+
+    while (done < (size_t)len) {
+      PHYSFS_sint64 r = PHYSFS_readBytes(f, &out[done], (size_t)len - done);
+
+      if (r <= 0)
+        break;
+
+      done += (size_t)r;
+    }
+
+    out.resize(done);
+  }
+
+  PHYSFS_close(f);
+  return true;
 }
