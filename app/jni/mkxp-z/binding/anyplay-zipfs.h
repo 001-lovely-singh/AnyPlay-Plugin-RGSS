@@ -85,6 +85,24 @@ if defined?(System) && System.respond_to?(:zip_mode?) && System.zip_mode?
   require 'stringio'
   module AnyPlayZipFS
     REAL_EXIST = File.method(:exist?)
+    # time shown for files that exist only inside the zip: the zip's own mtime, the same for
+    # every file (so "is PBS newer than Data?" checks never think something changed)
+    MTIME = (File.mtime(ENV["ANYPLAY_GAME_ZIP"].to_s) rescue Time.at(0))
+    # What File.open gives for a file inside the zip: a StringIO that also answers the
+    # File-only methods games use (file.mtime, file.path, file.flock, ...)
+    class ZipIO < StringIO
+      attr_accessor :zip_path
+      def path; @zip_path; end
+      alias_method :to_path, :path
+      def mtime; MTIME; end
+      def ctime; MTIME; end
+      def atime; MTIME; end
+      def flock(*a); 0; end
+      def fsync; 0; end
+      def fdatasync; 0; end
+      def chmod(*a); 0; end
+      def inspect; "#<File:#{@zip_path}>"; end
+    end
     # game-relative clean path, or nil when the path is not a plain relative game path
     def self.rel(p)
       p = p.to_path if !p.is_a?(String) && p.respond_to?(:to_path)
@@ -114,11 +132,13 @@ if defined?(System) && System.respond_to?(:zip_mode?) && System.zip_mode?
       return nil if REAL_EXIST.call(p)
       System.zip_stat(r) == 1 ? r : nil
     end
-    def self.io_for(r, mode)
+    def self.io_for(r, mode, path = nil)
       data = System.zip_read(r) or return nil
       data = data.dup
       data.force_encoding(mode.to_s.include?("b") ? Encoding::BINARY : Encoding::UTF_8)
-      StringIO.new(data)
+      io = ZipIO.new(data)
+      io.zip_path = (path.is_a?(String) ? path : r)
+      io
     end
     def self.read_mode?(m)
       return true if m.nil?
@@ -205,7 +225,7 @@ if defined?(System) && System.respond_to?(:zip_mode?) && System.zip_mode?
       if AnyPlayZipFS.read_mode?(mode)
         r = AnyPlayZipFS.only_zip_file(path)
         if r
-          io = AnyPlayZipFS.io_for(r, mode)
+          io = AnyPlayZipFS.io_for(r, mode, path)
           if io
             return io unless blk
             begin
@@ -236,10 +256,6 @@ if defined?(System) && System.respond_to?(:zip_mode?) && System.zip_mode?
   begin
   # ---- more File predicates / Kernel#open / FileTest (they used to see only the real disk) ----
   class << File
-    # time reported for files that exist only inside the zip: the zip's own mtime, the same
-    # for every file (so "is PBS newer than Data?" checks never think something changed)
-    ZIP_MTIME = (File.mtime(ENV["ANYPLAY_GAME_ZIP"].to_s) rescue Time.at(0))
-
     [:zero?, :empty?].each do |meth|
       next unless File.respond_to?(meth)
       real = File.method(meth)
@@ -274,7 +290,7 @@ if defined?(System) && System.respond_to?(:zip_mode?) && System.zip_mode?
           real.call(path)
         rescue Errno::ENOENT
           raise unless AnyPlayZipFS.stat(path)
-          ZIP_MTIME
+          AnyPlayZipFS::MTIME
         end
       end
     end
