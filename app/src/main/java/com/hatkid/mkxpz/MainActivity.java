@@ -70,6 +70,7 @@ public class MainActivity extends SDLActivity
     private static String sGameZip = null;           // zip being played, null = folder game
     private static ZipGameInfo sZipInfo = null;      // what was read from that zip
     private String mLaunchError = null;              // set when the launch cannot continue
+    private boolean mNeedAllFiles = false;           // launch stopped: "All files access" not granted yet
 
     // Runtime ids. A runtime = one libruby + one engine library, loaded together.
     // One process = one runtime: Ruby cannot be initialised twice in a process,
@@ -586,7 +587,15 @@ public class MainActivity extends SDLActivity
     protected void onCreate(Bundle savedInstanceState)
     {
         // Must be before super.onCreate(): picks the game folder before SDL starts.
-        if (!applyGameZipFromIntent(getIntent())) {
+        //
+        // FIX: the "All files access" check used to come AFTER the zip had been read, so on
+        // a fresh install the zip (e.g. on the SD card) was opened without permission
+        // (EACCES) and the save folder could not be written (EPERM). Now it is checked FIRST.
+        // If it is missing we open the settings page, close, and the user presses play again.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && !Environment.isExternalStorageManager()) {
+            mNeedAllFiles = true;
+            mLaunchError = "Allow \"All files access\" for AnyPlay RGSS Plugin, then press play again";
+        } else if (!applyGameZipFromIntent(getIntent())) {
             applyGameDirFromIntent(getIntent());
         }
         sNativeLibDir = getApplicationInfo().nativeLibraryDir;
@@ -600,6 +609,21 @@ public class MainActivity extends SDLActivity
             // The zip cannot be played directly (missing, encrypted archive inside, ...).
             Log.e(TAG, "Launch aborted: " + mLaunchError);
             Toast.makeText(this, mLaunchError, Toast.LENGTH_LONG).show();
+            if (mNeedAllFiles && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                try {
+                    Intent perm = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                            Uri.parse("package:" + getPackageName()));
+                    perm.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    startActivity(perm);
+                } catch (Exception e) {
+                    Log.w(TAG, "Could not open the All files access page: " + e);
+                    try {
+                        Intent all = new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION);
+                        all.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                        startActivity(all);
+                    } catch (Exception ignored) { }
+                }
+            }
             finish();
             return;
         }
@@ -618,17 +642,6 @@ public class MainActivity extends SDLActivity
         } catch (PackageManager.NameNotFoundException e) {
             Log.w(TAG, "Failed to set debug flag: " + e);
             e.printStackTrace();
-        }
-
-        // Check for all files access permission (Android 11+)
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            if (!Environment.isExternalStorageManager()) {
-                // Request all files access permission
-                // TODO: AlertDialog: polite notice that mkxp-z requires All Files Access permission.
-                Uri uri = Uri.parse("package:" + getPackageName());
-                Intent intent = new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION, uri);
-                startActivityForResult(intent, 110);
-            }
         }
 
         hideSystemUi();
