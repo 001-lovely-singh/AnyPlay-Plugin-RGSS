@@ -233,6 +233,75 @@ if defined?(System) && System.respond_to?(:zip_mode?) && System.zip_mode?
     define_method(:new) { |*a, **kw, &b| open_zip.call(a, kw, b) }
   end
 
+  begin
+  # ---- more File predicates / Kernel#open / FileTest (they used to see only the real disk) ----
+  class << File
+    # time reported for files that exist only inside the zip: the zip's own mtime, the same
+    # for every file (so "is PBS newer than Data?" checks never think something changed)
+    ZIP_MTIME = (File.mtime(ENV["ANYPLAY_GAME_ZIP"].to_s) rescue Time.at(0))
+
+    [:zero?, :empty?].each do |meth|
+      next unless File.respond_to?(meth)
+      real = File.method(meth)
+      define_method(meth) do |path|
+        return true if real.call(path)
+        r = AnyPlayZipFS.only_zip_file(path)
+        r ? System.zip_size(r) == 0 : false
+      end
+    end
+
+    if File.respond_to?(:size?)
+      real_size_p = File.method(:size?)
+      define_method(:size?) do |path|
+        v = real_size_p.call(path)
+        return v if v
+        r = AnyPlayZipFS.only_zip_file(path)
+        s = r && System.zip_size(r)
+        s && s > 0 ? s : nil
+      end
+    end
+
+    [:readable?, :readable_real?].each do |meth|
+      next unless File.respond_to?(meth)
+      real = File.method(meth)
+      define_method(meth) { |path| real.call(path) || !AnyPlayZipFS.stat(path).nil? }
+    end
+
+    [:mtime, :ctime, :atime].each do |meth|
+      real = File.method(meth)
+      define_method(meth) do |path|
+        begin
+          real.call(path)
+        rescue Errno::ENOENT
+          raise unless AnyPlayZipFS.stat(path)
+          ZIP_MTIME
+        end
+      end
+    end
+  end
+
+  # FileTest.exist? / file? / directory? are separate methods from File.exist? etc.
+  # Essentials (safeExists?, pbRgssExists?, ...) calls FileTest.* a lot.
+  [:exist?, :exists?, :file?, :directory?, :zero?, :empty?, :size?, :size, :readable?].each do |meth|
+    next unless FileTest.respond_to?(meth) && File.respond_to?(meth)
+    FileTest.define_singleton_method(meth) { |path| File.__send__(meth, path) }
+  end
+
+  # Kernel#open("Data/x.txt") of a file that exists only in the zip
+  module Kernel
+    alias_method :__anyplay_zip_open, :open
+    def open(path, *a, **kw, &b)
+      if (path.is_a?(String) || path.respond_to?(:to_path)) && AnyPlayZipFS.only_zip_file(path)
+        return File.open(path, *a, **kw, &b)
+      end
+      __anyplay_zip_open(path, *a, **kw, &b)
+    end
+    private :open
+  end
+  rescue Exception => e
+    (System.puts("AnyPlay zip shim extras failed: #{e.class}: #{e.message}") rescue nil)
+  end
+
   class << IO
     [:read, :binread, :readlines, :foreach].each do |meth|
       real = IO.method(meth)
