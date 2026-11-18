@@ -1676,7 +1676,7 @@ end
 # catches itself - those are marked), (3) the final error that stopped the game
 # with the full call chain, and (4) a few notes (touch / slow frames) for context.
 module AnyPlayLog
-  VERSION   = "0.1.42"
+  VERSION   = "0.1.43"
   FILE      = "AnyPlayLog.txt"
   MAX_BYTES = 250_000
   CAPS      = { error: 200, note: 400 }
