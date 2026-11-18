@@ -85,6 +85,7 @@ if defined?(System) && System.respond_to?(:zip_mode?) && System.zip_mode?
   require 'stringio'
   module AnyPlayZipFS
     REAL_EXIST = File.method(:exist?)
+    REAL_OPEN = File.method(:open)
     # time shown for files that exist only inside the zip: the zip's own mtime, the same for
     # every file (so "is PBS newer than Data?" checks never think something changed)
     MTIME = (File.mtime(ENV["ANYPLAY_GAME_ZIP"].to_s) rescue Time.at(0))
@@ -102,6 +103,83 @@ if defined?(System) && System.respond_to?(:zip_mode?) && System.zip_mode?
       def fdatasync; 0; end
       def chmod(*a); 0; end
       def inspect; "#<File:#{@zip_path}>"; end
+      # games test "is this a File?" (is_a?(File), case/when File)
+      def is_a?(k); (k == File || k == IO) ? true : super; end
+      alias_method :kind_of?, :is_a?
+      # Games add their own reading helpers to File (Essentials: fgetb / fgetw / fgetdw ...,
+      # either in a module included into File or straight in class File). A StringIO has
+      # none of them, so: 1) take over the modules File includes, 2) for methods written
+      # straight into class File, run them on a real temporary copy of this file.
+      def method_missing(name, *args, &blk)
+        AnyPlayZipFS.adopt_modules
+        return __send__(name, *args, &blk) if self.class.method_defined?(name)
+        if File.method_defined?(name)
+          real = real_file
+          if real
+            real.pos = pos
+            begin
+              return real.__send__(name, *args, &blk)
+            ensure
+              (self.pos = real.pos) rescue nil
+            end
+          end
+        end
+        super
+      end
+      def respond_to_missing?(name, priv = false)
+        AnyPlayZipFS.adopt_modules
+        self.class.method_defined?(name) || File.method_defined?(name) || super
+      end
+      def real_file
+        return @real if @real
+        dir = AnyPlayZipFS.tmp_dir or return nil
+        @real_path = File.join(dir, "z#{$$}_#{object_id}.tmp")
+        REAL_OPEN.call(@real_path, "wb") { |f| f.write(string) }
+        @real = REAL_OPEN.call(@real_path, "rb")
+      rescue Exception
+        nil
+      end
+      def close
+        r = super
+        begin
+          if @real
+            @real.close unless @real.closed?
+            File.delete(@real_path)
+            @real = nil
+          end
+        rescue Exception
+        end
+        r
+      end
+    end
+    SKIP_MODS = [Kernel, Comparable, Enumerable]
+    # include into ZipIO every game-made module that class File includes
+    def self.adopt_modules
+      added = false
+      File.ancestors.each do |m|
+        next if m.is_a?(Class) || SKIP_MODS.include?(m) || ZipIO.include?(m) || IO.include?(m)
+        begin
+          ZipIO.send(:include, m)
+          added = true
+        rescue Exception
+        end
+      end
+      added
+    end
+    # a writable folder for the temporary copies (only used for the rare class-File case)
+    def self.tmp_dir
+      return @tmp_dir if @tmp_dir
+      [ENV["TMPDIR"], File.join(Dir.pwd, ".anyplay_tmp")].compact.each do |d|
+        begin
+          Dir.mkdir(d) unless REAL_EXIST.call(d)
+          t = File.join(d, "t#{$$}.chk")
+          REAL_OPEN.call(t, "wb") { |f| f.write("x") }
+          File.delete(t)
+          return @tmp_dir = d
+        rescue Exception
+        end
+      end
+      nil
     end
     # game-relative clean path, or nil when the path is not a plain relative game path
     def self.rel(p)
@@ -316,6 +394,14 @@ if defined?(System) && System.respond_to?(:zip_mode?) && System.zip_mode?
   end
   rescue Exception => e
     (System.puts("AnyPlay zip shim extras failed: #{e.class}: #{e.message}") rescue nil)
+  end
+
+  class << IO
+    # File === x / IO === x is also true for a file opened from the zip
+    def ===(o)
+      return true if (equal?(File) || equal?(IO)) && o.instance_of?(AnyPlayZipFS::ZipIO)
+      super
+    end
   end
 
   class << IO
