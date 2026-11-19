@@ -1676,7 +1676,7 @@ end
 # catches itself - those are marked), (3) the final error that stopped the game
 # with the full call chain, and (4) a few notes (touch / slow frames) for context.
 module AnyPlayLog
-  VERSION   = "0.1.43"
+  VERSION   = "0.1.44"
   FILE      = "AnyPlayLog.txt"
   MAX_BYTES = 250_000
   CAPS      = { error: 200, note: 400 }
@@ -3620,7 +3620,17 @@ module AnyPlayPerf
                       end
                       if b && !b.disposed? && b.width > 0 && b.height > 0
                         begin
-                          @tilemap.autotiles[i] = b
+                          # The game's own tilemap wrapper can swallow autotiles[i]= for this slot
+                          # (the engine's set counter for slot 1 stayed at 0). Give the bitmap to the
+                          # engine's real autotile list directly, skipping any wrapper.
+                          nat = (Tilemap.instance_method(:autotiles).bind(@tilemap).call rescue nil)
+                          if nat
+                            nat[i] = b
+                            step << " native"
+                          else
+                            @tilemap.autotiles[i] = b
+                            step << " wrapper"
+                          end
                           old = @__ap_at_copies[i]
                           @__ap_at_copies[i] = b
                           (old.dispose if old && !old.equal?(b) && !old.disposed?) rescue nil
