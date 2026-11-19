@@ -1309,6 +1309,37 @@ end
 class << Dir
   alias_method :exists?, :exist? unless respond_to?(:exists?)
 end
+# Ruby 1.8 games (Essentials) define their own  using(window) { ... }  which disposes the
+# objects after the block. Ruby 2+ has Module#using / main.using (refinements); inside a
+# module or class method those come first and stop the game with
+# "Module#using is not permitted in methods". When a block is given, call the game's own
+# using instead; without a block it is still the real refinement call.
+begin
+  if defined?(RUBY_DESCRIPTION_REAL) # only the Ruby 1.8 layer (r18); modern games keep refinements
+  __ap_mod_using = (Module.instance_method(:using) rescue nil)
+  __ap_game_using = lambda do |recv|
+    begin
+      Object.instance_method(:using).bind(recv)
+    rescue NameError, TypeError
+      nil
+    end
+  end
+  Module.class_eval do
+    define_method(:using) do |*a, &b|
+      g = b && __ap_game_using.call(self)
+      if g
+        g.call(*a, &b)
+      elsif __ap_mod_using
+        __ap_mod_using.bind(self).call(*a)
+      else
+        raise NoMethodError, "undefined method `using'"
+      end
+    end
+    private :using
+  end
+  end
+rescue Exception
+end
 Fixnum = Integer unless defined?(Fixnum)
 Bignum = Integer unless defined?(Bignum)
 )RB", &reqState);
@@ -1676,7 +1707,7 @@ end
 # catches itself - those are marked), (3) the final error that stopped the game
 # with the full call chain, and (4) a few notes (touch / slow frames) for context.
 module AnyPlayLog
-  VERSION   = "0.1.44"
+  VERSION   = "0.1.45"
   FILE      = "AnyPlayLog.txt"
   MAX_BYTES = 250_000
   CAPS      = { error: 200, note: 400 }
