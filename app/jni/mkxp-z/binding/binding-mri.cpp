@@ -1340,6 +1340,47 @@ begin
   end
 rescue Exception
 end
+# Ruby 1.8: proc { ... } was the same as lambda { ... }, so "return" inside it only left the
+# proc. In Ruby 3 a "return" in a top-level proc raises LocalJumpError (Essentials item and move
+# handlers are registered like that, e.g. BattleUseOnBattler.add(:X, proc { ...; return true })).
+# Wrap such procs so the "return" just ends the proc and gives its value back.
+begin
+  if defined?(RUBY_DESCRIPTION_REAL)
+    module AnyPlayProcCompat
+      def self.wrap(recv, blk)
+        recv.instance_eval do
+          lambda do |*a|
+            begin
+              instance_exec(*a, &blk)
+            rescue LocalJumpError => e
+              raise unless e.reason == :return
+              e.exit_value
+            end
+          end
+        end
+      end
+    end
+    module Kernel
+      private
+      def proc(&blk)
+        raise ArgumentError, "tried to create Proc object without a block" unless blk
+        return blk if blk.lambda?
+        AnyPlayProcCompat.wrap(self, blk)
+      end
+    end
+    class Proc
+      class << self
+        alias_method :__anyplay_orig_new, :new
+        def new(*a, &blk)
+          pr = __anyplay_orig_new(*a, &blk)
+          return pr unless self.equal?(Proc) && !pr.lambda?
+          AnyPlayProcCompat.wrap(blk.binding.receiver, pr)
+        end
+      end
+    end
+  end
+rescue Exception
+end
 Fixnum = Integer unless defined?(Fixnum)
 Bignum = Integer unless defined?(Bignum)
 )RB", &reqState);
@@ -1707,7 +1748,7 @@ end
 # catches itself - those are marked), (3) the final error that stopped the game
 # with the full call chain, and (4) a few notes (touch / slow frames) for context.
 module AnyPlayLog
-  VERSION   = "0.1.45"
+  VERSION   = "0.1.46"
   FILE      = "AnyPlayLog.txt"
   MAX_BYTES = 250_000
   CAPS      = { error: 200, note: 400 }
