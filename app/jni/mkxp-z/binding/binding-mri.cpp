@@ -1381,6 +1381,15 @@ begin
   end
 rescue Exception
 end
+# Ruby 1.8 had Object#id (= object_id). Games still call it, e.g. PokeBattle_AI#pbTypeModMove.
+begin
+  if defined?(RUBY_DESCRIPTION_REAL)
+    class Object
+      def id; object_id; end unless method_defined?(:id)
+    end
+  end
+rescue Exception
+end
 Fixnum = Integer unless defined?(Fixnum)
 Bignum = Integer unless defined?(Bignum)
 )RB", &reqState);
@@ -1748,7 +1757,7 @@ end
 # catches itself - those are marked), (3) the final error that stopped the game
 # with the full call chain, and (4) a few notes (touch / slow frames) for context.
 module AnyPlayLog
-  VERSION   = "0.1.46"
+  VERSION   = "0.1.47"
   FILE      = "AnyPlayLog.txt"
   MAX_BYTES = 250_000
   CAPS      = { error: 200, note: 400 }
@@ -2785,15 +2794,52 @@ module AnyPlayCheats
     end
 
     def mon_heal_status(p)
-      if p.respond_to?(:heal_status) then p.heal_status else p.healStatus end
+      if p.respond_to?(:heal_status) then p.heal_status
+      elsif p.respond_to?(:healStatus) then p.healStatus
+      else
+        p.status = 0 if p.respond_to?(:status=)
+        p.statusCount = 0 if p.respond_to?(:statusCount=)
+      end
     end
 
     def mon_heal_pp(p)
-      if p.respond_to?(:heal_PP) then p.heal_PP else p.healPP end
+      if p.respond_to?(:heal_PP) then p.heal_PP
+      elsif p.respond_to?(:healPP) then p.healPP
+      else
+        (p.moves || []).each do |m|
+          next unless m
+          tp = m.respond_to?(:total_pp) ? m.total_pp : m.totalpp
+          m.pp = tp if m.pp < tp
+        end
+      end
     end
 
     def mon_calc(p)
-      if p.respond_to?(:calc_stats) then p.calc_stats else p.calcStats end
+      if p.respond_to?(:calc_stats) then p.calc_stats
+      elsif p.respond_to?(:calcStats) then p.calcStats
+      end
+    end
+
+    # call a game method with as many arguments as that game's version accepts
+    # (forks of Essentials differ: pbReduceHP(amt) / pbReduceHP(amt, anim) ...)
+    def flex(obj, name, *args)
+      ar = obj.method(name).arity
+      args = args.first(ar) if ar >= 0 && args.size > ar
+      obj.__send__(name, *args)
+    end
+
+    # one cheat failing must never switch the other cheats off
+    def guard(name)
+      @muted ||= {}
+      return nil if @muted[name]
+      yield
+    rescue Exception => e
+      @err_counts ||= {}
+      k = "#{name}:#{e.class}"
+      n = (@err_counts[k] = (@err_counts[k] || 0) + 1)
+      AnyPlayLog.error("cheats #{name}: #{e.class}: #{e.message.to_s[0, 200]}") if n <= 2 rescue nil
+      @muted[name] = true if n >= 30
+      nil
     end
 
     def max_level
@@ -3155,8 +3201,9 @@ module AnyPlayCheats
         return NEED_BATTLE unless b
         foes = b.battlers.compact.select { |x| foe?(b, x.index) && !x.fainted? }
         foes.each do |f|
-          f.pbReduceHP(f.hp, false)
-          f.pbFaint(true)
+          flex(f, f.respond_to?(:__ap_cheat_reduce) ? :__ap_cheat_reduce : :pbReduceHP, f.hp, false)
+          flex(f, :pbFaint, true) rescue nil
+          f.hp = 0 rescue nil
         end
         foe_party = b.respond_to?(:party2) ? b.party2 : b.pbParty(1)
         (foe_party || []).each { |p| p.hp = 0 if p }
@@ -3249,47 +3296,58 @@ module AnyPlayCheats
 
     def apply_ess
       t = trainer
-      if on?('hpmp') && t
-        pokes.each do |p|
-          next if p.egg?
-          p.hp = p.totalhp if p.hp != p.totalhp
-          (mon_heal_pp(p) rescue nil)
-        end
-        if @battle
-          @battle.battlers.compact.each do |x|
-            next if foe?(@battle, x.index) || x.fainted?
-            x.hp = x.totalhp if x.hp != x.totalhp
-            (x.moves || []).each do |m|
-              next unless m
-              tp = m.respond_to?(:total_pp) ? m.total_pp : m.totalpp
-              m.pp = tp if m.pp < tp
-            end rescue nil
+      guard('hpmp') do
+        if on?('hpmp') && t
+          pokes.each do |p|
+            next if p.egg?
+            p.hp = p.totalhp if p.hp != p.totalhp
+            (mon_heal_pp(p) rescue nil)
+          end
+          if @battle
+            @battle.battlers.compact.each do |x|
+              next if foe?(@battle, x.index) || x.fainted?
+              x.hp = x.totalhp if x.hp != x.totalhp
+              (x.moves || []).each do |m|
+                next unless m
+                tp = m.respond_to?(:total_pp) ? m.total_pp : m.totalpp
+                m.pp = tp if m.pp < tp
+              end rescue nil
+            end
           end
         end
       end
-      if on?('status') && t
-        pokes.each { |p| mon_heal_status(p) if !p.egg? && !no_status?(p.status) }
-        if @battle
-          @battle.battlers.compact.each do |x|
-            next if foe?(@battle, x.index) || x.fainted?
-            x.pbCureStatus(false) unless no_status?(x.status)
+      guard('status') do
+        if on?('status') && t
+          pokes.each { |p| mon_heal_status(p) if !p.egg? && !no_status?(p.status) }
+          if @battle
+            @battle.battlers.compact.each do |x|
+              next if foe?(@battle, x.index) || x.fainted?
+              next if no_status?(x.status)
+              if x.respond_to?(:pbCureStatus)
+                flex(x, :pbCureStatus, false)
+              else
+                x.status = 0
+              end
+            end
           end
         end
       end
-      if on?('gold') && t
-        t.money = 999_999 if t.money < 999_999
+      guard('gold') do
+        t.money = 999_999 if on?('gold') && t && t.money < 999_999
       end
-      keep_items if on?('items')
-      if on?('fastText') && defined?($PokemonSystem) && $PokemonSystem
-        @old_textspeed = $PokemonSystem.textspeed if @old_textspeed.nil?
-        $PokemonSystem.textspeed = 2 if $PokemonSystem.textspeed != 2
-        # The game keeps its own copy of the speed (MessageConfig), so set that too.
-        if !@fast_text_set && defined?(MessageConfig) && MessageConfig.respond_to?(:pbSetTextSpeed)
-          MessageConfig.pbSetTextSpeed(MessageConfig.pbSettingToTextSpeed(2))
-          @fast_text_set = true
+      guard('items') { keep_items if on?('items') }
+      guard('fastText') do
+        if on?('fastText') && defined?($PokemonSystem) && $PokemonSystem
+          @old_textspeed = $PokemonSystem.textspeed if @old_textspeed.nil?
+          $PokemonSystem.textspeed = 2 if $PokemonSystem.textspeed != 2
+          # The game keeps its own copy of the speed (MessageConfig), so set that too.
+          if !@fast_text_set && defined?(MessageConfig) && MessageConfig.respond_to?(:pbSetTextSpeed)
+            MessageConfig.pbSetTextSpeed(MessageConfig.pbSettingToTextSpeed(2))
+            @fast_text_set = true
+          end
         end
       end
-      common_map_cheats
+      guard('common') { common_map_cheats }
     end
 
     def apply_rpgm
@@ -3496,6 +3554,88 @@ module AnyPlayCheats
       end
     end
   end
+end
+
+
+# ---- AnyPlay: save diagnostics. Games swallow save errors, so write what happens to the
+# save files (*.rxdata / *.rvdata*) into AnyPlayLog.txt: which file is opened for writing,
+# how big it is afterwards, renames / deletes, and any Marshal.dump that fails.
+module AnyPlaySaveWatch
+  RE = /\.(?:rxdata|rvdata2?|sav|dat)\z/i
+  @n = 0
+  def self.say(msg)
+    return if (@n += 1) > 80
+    AnyPlayLog.menu("save: " + msg)
+  rescue Exception
+  end
+  def self.save_file?(path)
+    path.is_a?(String) && path =~ RE && File.basename(path) !~ /\A(?:Scripts|Map\d+|Tilesets|Items|Skills|Weapons|Armors|Actors|Classes|Enemies|Troops|States|Animations|CommonEvents|System|MapInfos)\.rx/i
+  end
+  def self.info(path)
+    File.exist?(path) ? "#{File.size(path)} bytes, #{File.mtime(path).strftime('%m-%d %H:%M:%S')}" : "missing"
+  rescue Exception
+    "?"
+  end
+  def self.startup
+    list = (Dir.glob("*.{rxdata,rvdata,rvdata2}") rescue [])
+    list = list.select { |f| save_file?(f) }
+    say("files at start: " + (list.empty? ? "none" : list.sort.map { |f| "#{f}=#{info(f)}" }.join("; ")))
+  rescue Exception
+  end
+end
+begin
+  fopen_w = File.method(:open)
+  File.define_singleton_method(:open) do |*a, **kw, &b|
+    path = a[0]
+    mode = a[1]
+    mode = kw[:mode] if mode.nil?
+    writing = mode.is_a?(Integer) || (mode.is_a?(String) && mode =~ /[wa+]/)
+    watch = writing && AnyPlaySaveWatch.save_file?(path)
+    unless watch
+      return(kw.empty? ? fopen_w.call(*a, &b) : fopen_w.call(*a, **kw, &b))
+    end
+    before = AnyPlaySaveWatch.info(path)
+    begin
+      r = kw.empty? ? fopen_w.call(*a, &b) : fopen_w.call(*a, **kw, &b)
+      AnyPlaySaveWatch.say("wrote #{path} (mode #{mode}): was #{before}, now #{AnyPlaySaveWatch.info(path)}") if b
+      AnyPlaySaveWatch.say("opened #{path} (mode #{mode}): was #{before}") unless b
+      r
+    rescue Exception => e
+      AnyPlayLog.error("save: writing #{path} failed: #{e.class}: #{e.message.to_s[0, 200]} (was #{before}, now #{AnyPlaySaveWatch.info(path)})")
+      raise
+    end
+  end
+  [[File, :rename], [File, :delete], [File, :unlink]].each do |mod, meth|
+    next unless mod.respond_to?(meth)
+    orig = mod.method(meth)
+    mod.define_singleton_method(meth) do |*a, &b|
+      w = a.any? { |x| AnyPlaySaveWatch.save_file?(x) }
+      unless w
+        return orig.call(*a, &b)
+      end
+      begin
+        r = orig.call(*a, &b)
+        AnyPlaySaveWatch.say("#{meth} #{a.map { |x| File.basename(x.to_s) }.join(' -> ')} ok")
+        r
+      rescue Exception => e
+        AnyPlayLog.error("save: #{meth} #{a.join(' -> ')} failed: #{e.class}: #{e.message.to_s[0, 200]}")
+        raise
+      end
+    end
+  end
+  m_dump = Marshal.method(:dump)
+  Marshal.define_singleton_method(:dump) do |*a, &b|
+    begin
+      m_dump.call(*a, &b)
+    rescue Exception => e
+      if a[1].respond_to?(:write) && !AnyPlayLog.instance_variable_get(:@internal).to_i.positive?
+        AnyPlayLog.error("save: Marshal.dump into a file failed: #{e.class}: #{e.message.to_s[0, 240]}")
+      end
+      raise
+    end
+  end
+  AnyPlaySaveWatch.startup
+rescue Exception
 end
 
 AnyPlayTouch.native_resize = (Graphics.method(:resize_screen) rescue nil)
